@@ -23,15 +23,19 @@ docker run -p 3000:3000 form-bot
 
 Then open `http://localhost:3000` (or your host’s public URL).
 
-### Deploy (Railway / Render / VPS)
+### Deploy on AWS Lightsail / EC2
 
-| Host | How |
-|------|-----|
-| **Railway** | New project → Deploy from GitHub/Dockerfile → set start to `node server.js` (or use the Dockerfile). Open the generated URL. |
-| **Render** | Web Service + Dockerfile. Disable auto-sleep for long batches. |
-| **DigitalOcean / Hetzner** | Build & run the Docker image, or `npm start` with Playwright Chromium installed. Open port 3000 (or put nginx in front). |
+Step-by-step: **[deploy/AWS.md](deploy/AWS.md)**
 
-Needs a **long-running Node process** with Chromium — not Vercel/Netlify.
+Short version: create a **2 GB+** Ubuntu instance → open port **3000** → upload this repo → run:
+
+```bash
+sudo bash deploy/setup-instance.sh
+```
+
+Then open `http://YOUR_PUBLIC_IP:3000`.
+
+Also works on Railway / Render / any VPS with Docker. Needs a **long-running** host with Chromium — not Vercel/Netlify.
 
 Env vars:
 
