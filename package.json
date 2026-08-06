@@ -11,6 +11,6 @@
     "fill:batch:headless": "HEADLESS=true node fill-form.js"
   },
   "dependencies": {
-    "playwright": "^1.52.0"
+    "playwright": "1.61.0"
   }
 }
