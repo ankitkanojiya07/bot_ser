@@ -1,7 +1,7 @@
 {
   "language": "हिंदी",
-  "promoter": "Promoter-100",
+  "promoters": "48,49,53,54",
   "random": true,
-  "count": 500,
+  "count": 1000,
   "perMinute": 4
 }

@@ -104,6 +104,41 @@ function getPerMinute(config) {
   return config.perMinute ?? 4;
 }
 
+/** Accept "48", "Promoter-48", comma/newline lists. Returns unique Promoter-N values. */
+export function parsePromoters(input) {
+  const raw = Array.isArray(input) ? input.join(",") : String(input ?? "");
+  const parts = raw
+    .split(/[\s,;]+/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  const promoters = [];
+  const seen = new Set();
+  for (const part of parts) {
+    const match = part.match(/^(?:promoter-)?(\d+)$/i);
+    const value = match ? `Promoter-${match[1]}` : part;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    promoters.push(value);
+  }
+  return promoters;
+}
+
+function resolvePromoterQueue(config) {
+  const fromList = parsePromoters(config.promoters ?? config.promoter ?? "");
+  if (fromList.length === 0) {
+    throw new Error("At least one promoter is required (e.g. 48,49,53 or Promoter-3)");
+  }
+  const countPer = getRunCount(config);
+  const queue = [];
+  for (const promoter of fromList) {
+    for (let n = 1; n <= countPer; n++) {
+      queue.push({ promoter, indexInPromoter: n, countPer });
+    }
+  }
+  return { promoters: fromList, countPer, queue };
+}
+
 /** Wait until fewer than `perMinute` runs have started in the last 60s. */
 async function waitForRateLimit(recentStarts, perMinute, { shouldStop, onLog } = {}) {
   const windowMs = 60_000;
@@ -212,7 +247,7 @@ async function fillForm(page, data, { isFirstRun }) {
 
 /**
  * Run a batch of form submissions.
- * @param {object} config - { language, promoter, count, perMinute, random? }
+ * @param {object} config - { language, promoter|promoters, count (per promoter), perMinute, random? }
  * @param {object} options - { headless?, onLog?, onProgress?, shouldStop? }
  */
 export async function runBatch(config, options = {}) {
@@ -223,7 +258,8 @@ export async function runBatch(config, options = {}) {
     shouldStop = () => false,
   } = options;
 
-  const runCount = getRunCount(config);
+  const { promoters, countPer, queue } = resolvePromoterQueue(config);
+  const runCount = queue.length;
   const perMinute = getPerMinute(config);
   const estimatedMinutes = Math.ceil(runCount / perMinute);
 
@@ -233,8 +269,9 @@ export async function runBatch(config, options = {}) {
   };
 
   log(
-    `Starting ${runCount} form submission(s) | promoter=${config.promoter} | max ${perMinute}/minute (~${estimatedMinutes} min)...`
+    `Starting ${runCount} form submission(s) | ${promoters.length} promoter(s) × ${countPer} | max ${perMinute}/minute (~${estimatedMinutes} min)...`
   );
+  log(`Promoters: ${promoters.join(", ")}`);
 
   const browser = await chromium.launch({ headless });
   const results = [];
@@ -255,14 +292,21 @@ export async function runBatch(config, options = {}) {
       }
       recentStarts.push(Date.now());
 
-      const data = buildRunData(config);
+      const slot = queue[i - 1];
+      const data = buildRunData({ ...config, promoter: slot.promoter });
 
-      log(`\n--- Run ${i}/${runCount} ---`);
+      log(`\n--- Run ${i}/${runCount} | ${slot.promoter} (${slot.indexInPromoter}/${slot.countPer}) ---`);
       log(`Name: ${data.fullName}`);
 
       try {
         await fillForm(page, data, { isFirstRun: i === 1 });
-        const result = { run: i, name: data.fullName, status: "success", url: page.url() };
+        const result = {
+          run: i,
+          name: data.fullName,
+          promoter: slot.promoter,
+          status: "success",
+          url: page.url(),
+        };
         results.push(result);
         log(`Run ${i} done: ${page.url()}`);
         onProgress({ current: i, total: runCount, results });
@@ -273,7 +317,13 @@ export async function runBatch(config, options = {}) {
         }
       } catch (error) {
         if (error.message === "Stopped by user") throw error;
-        const result = { run: i, name: data.fullName, status: "failed", error: error.message };
+        const result = {
+          run: i,
+          name: data.fullName,
+          promoter: slot.promoter,
+          status: "failed",
+          error: error.message,
+        };
         results.push(result);
         console.error(`Run ${i} failed: ${error.message}`);
         onLog(`Run ${i} failed: ${error.message}`);
@@ -309,11 +359,13 @@ export async function runBatch(config, options = {}) {
 
   log("\n=== Summary ===");
   log(`Total: ${results.length} | Success: ${succeeded} | Failed: ${failed}`);
-  for (const result of results) {
-    log(`  Run ${result.run}: ${result.status} - ${result.name}`);
+  for (const promoter of promoters) {
+    const ok = results.filter((r) => r.promoter === promoter && r.status === "success").length;
+    const bad = results.filter((r) => r.promoter === promoter && r.status === "failed").length;
+    log(`  ${promoter}: success ${ok} | failed ${bad}`);
   }
 
-  return { results, succeeded, failed, total: results.length };
+  return { results, succeeded, failed, total: results.length, promoters, countPer };
 }
 
 async function main() {

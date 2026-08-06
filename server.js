@@ -2,7 +2,7 @@ import { createServer } from "http";
 import { readFileSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
-import { runBatch } from "./fill-form.js";
+import { runBatch, parsePromoters } from "./fill-form.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
@@ -85,8 +85,8 @@ function loadDefaults() {
   }
   return {
     language: "हिंदी",
-    promoter: "Promoter-3",
-    count: 50,
+    promoters: "",
+    count: 1000,
     perMinute: 4,
   };
 }
@@ -96,22 +96,26 @@ async function startJob(input) {
     throw new Error("A job is already running");
   }
 
-  const promoter = String(input.promoter || "").trim();
+  const promotersRaw = String(input.promoters ?? input.promoter ?? "").trim();
+  const promoters = parsePromoters(promotersRaw);
   const count = Number(input.count);
   const perMinute = Number(input.perMinute);
   const language = String(input.language || "हिंदी").trim();
 
-  if (!promoter) throw new Error("Promoter is required");
+  if (promoters.length === 0) {
+    throw new Error("Enter at least one promoter id (e.g. 48,49,53)");
+  }
   if (!Number.isFinite(count) || count < 1 || count > 10000) {
-    throw new Error("Count must be between 1 and 10000");
+    throw new Error("Count per promoter must be between 1 and 10000");
   }
   if (!Number.isFinite(perMinute) || perMinute < 1 || perMinute > 60) {
     throw new Error("Per minute must be between 1 and 60");
   }
 
+  const total = promoters.length * count;
   const config = {
     language,
-    promoter,
+    promoters,
     count,
     perMinute,
     random: true,
@@ -123,14 +127,17 @@ async function startJob(input) {
   job.finishedAt = null;
   job.config = config;
   job.current = 0;
-  job.total = count;
+  job.total = total;
   job.succeeded = 0;
   job.failed = 0;
   job.logs = [];
   job.results = [];
   job.error = null;
 
-  pushLog(`Job queued: ${promoter}, ${count} forms, ${perMinute}/min`);
+  pushLog(
+    `Job queued: ${promoters.length} promoters × ${count} = ${total} forms, ${perMinute}/min`
+  );
+  pushLog(`Promoters: ${promoters.join(", ")}`);
 
   // Run in background
   setImmediate(async () => {
@@ -139,9 +146,9 @@ async function startJob(input) {
         headless: true,
         shouldStop: () => job.stopRequested,
         onLog: (msg) => pushLog(String(msg).trimEnd()),
-        onProgress: ({ current, total, results }) => {
+        onProgress: ({ current, total: t, results }) => {
           job.current = current;
-          job.total = total;
+          job.total = t;
           job.results = results;
           job.succeeded = results.filter((r) => r.status === "success").length;
           job.failed = results.filter((r) => r.status === "failed").length;
@@ -220,7 +227,7 @@ const HTML = `<!DOCTYPE html>
       font-weight: 500;
     }
     .field { margin-bottom: 1rem; }
-    input, select {
+    input, select, textarea {
       width: 100%;
       padding: 0.65rem 0.75rem;
       border-radius: 8px;
@@ -229,7 +236,14 @@ const HTML = `<!DOCTYPE html>
       color: var(--text);
       font-size: 1rem;
     }
-    input:focus, select:focus {
+    textarea {
+      min-height: 88px;
+      resize: vertical;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.9rem;
+      line-height: 1.4;
+    }
+    input:focus, select:focus, textarea:focus {
       outline: none;
       border-color: var(--accent);
     }
@@ -332,24 +346,25 @@ const HTML = `<!DOCTYPE html>
 <body>
   <main>
     <h1>Form Bot</h1>
-    <p class="sub">Set promoter, rate, and count — then run on this server.</p>
+    <p class="sub">Paste promoter ids, set count per promoter and rate — runs all in one job.</p>
 
     <form id="jobForm">
       <div class="field">
-        <label for="promoter">Promoter</label>
-        <input id="promoter" name="promoter" placeholder="Promoter-3" required />
-        <p class="hint">Must match an option on the live form (e.g. Promoter-3)</p>
+        <label for="promoters">Promoter IDs</label>
+        <textarea id="promoters" name="promoters" placeholder="48,49,53,54,57" required></textarea>
+        <p class="hint">Comma-separated numbers (e.g. 48,49,53). Change anytime — not hardcoded. Also accepts Promoter-48.</p>
       </div>
       <div class="row">
         <div class="field">
-          <label for="count">Count</label>
-          <input id="count" name="count" type="number" min="1" max="10000" value="50" required />
+          <label for="count">Count per promoter</label>
+          <input id="count" name="count" type="number" min="1" max="10000" value="1000" required />
         </div>
         <div class="field">
           <label for="perMinute">Per minute</label>
           <input id="perMinute" name="perMinute" type="number" min="1" max="60" value="4" required />
         </div>
       </div>
+      <p class="hint" id="totalHint" style="margin-top:-0.4rem;margin-bottom:1rem;"></p>
       <div class="field">
         <label for="language">Language</label>
         <select id="language" name="language">
@@ -383,14 +398,35 @@ const HTML = `<!DOCTYPE html>
     const badge = document.getElementById("badge");
     const logsEl = document.getElementById("logs");
     const progressBar = document.getElementById("progressBar");
+    const totalHint = document.getElementById("totalHint");
+
+    function parseIds(text) {
+      return String(text || "")
+        .split(/[\\s,;]+/)
+        .map((p) => p.trim())
+        .filter(Boolean);
+    }
+
+    function updateTotalHint() {
+      const n = parseIds(form.promoters.value).length;
+      const c = Number(form.count.value) || 0;
+      const pm = Number(form.perMinute.value) || 1;
+      const total = n * c;
+      const mins = total ? Math.ceil(total / pm) : 0;
+      totalHint.textContent = n
+        ? "Total forms: " + total + " (" + n + " promoters × " + c + ") · ~" + mins + " min at " + pm + "/min"
+        : "Paste promoter ids above";
+    }
 
     async function loadDefaults() {
       const res = await fetch("/api/defaults");
       const d = await res.json();
-      if (d.promoter) form.promoter.value = d.promoter;
+      if (d.promoters) form.promoters.value = Array.isArray(d.promoters) ? d.promoters.join(",") : d.promoters;
+      else if (d.promoter) form.promoters.value = d.promoter;
       if (d.count) form.count.value = d.count;
       if (d.perMinute) form.perMinute.value = d.perMinute;
       if (d.language) form.language.value = d.language;
+      updateTotalHint();
     }
 
     function setBadge(state) {
@@ -402,7 +438,7 @@ const HTML = `<!DOCTYPE html>
       const running = status.running;
       startBtn.disabled = running;
       stopBtn.disabled = !running;
-      form.promoter.disabled = running;
+      form.promoters.disabled = running;
       form.count.disabled = running;
       form.perMinute.disabled = running;
       form.language.disabled = running;
@@ -435,11 +471,15 @@ const HTML = `<!DOCTYPE html>
       }
     }
 
+    form.promoters.addEventListener("input", updateTotalHint);
+    form.count.addEventListener("input", updateTotalHint);
+    form.perMinute.addEventListener("input", updateTotalHint);
+
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       startBtn.disabled = true;
       const payload = {
-        promoter: form.promoter.value.trim(),
+        promoters: form.promoters.value.trim(),
         count: Number(form.count.value),
         perMinute: Number(form.perMinute.value),
         language: form.language.value,
