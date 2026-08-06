@@ -2,7 +2,11 @@ import { chromium } from "playwright";
 import { readFileSync, existsSync } from "fs";
 import { fileURLToPath, pathToFileURL } from "url";
 import { dirname, join, resolve } from "path";
-import { generateRandomIndianName, generateRandomAnswers } from "./random-data.js";
+import {
+  generateRandomIndianName,
+  generateRandomAnswers,
+  pickWeightedGender,
+} from "./random-data.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FORM_URL = "https://seeedemaseekhelp.com/kanwar_yatra/";
@@ -83,10 +87,11 @@ function loadConfig() {
 
 function buildRunData(config) {
   if (config.random !== false) {
+    const gender = pickWeightedGender();
     return {
       ...config,
-      fullName: generateRandomIndianName(),
-      answers: generateRandomAnswers(),
+      fullName: generateRandomIndianName(gender),
+      answers: generateRandomAnswers(gender),
     };
   }
   return config;

@@ -1,9 +1,12 @@
-const FIRST_NAMES = [
+const MALE_FIRST_NAMES = [
   "Aarav", "Vivaan", "Aditya", "Vihaan", "Arjun", "Sai", "Reyansh", "Ayaan",
   "Krishna", "Ishaan", "Shaurya", "Atharv", "Advik", "Pranav", "Kabir", "Rudra",
+  "Rahul", "Amit", "Suresh", "Rajesh", "Vikram", "Sanjay", "Deepak", "Manoj",
+];
+
+const FEMALE_FIRST_NAMES = [
   "Ananya", "Aadhya", "Diya", "Myra", "Saanvi", "Anika", "Navya", "Ira",
   "Kiara", "Pari", "Riya", "Meera", "Kavya", "Ishita", "Priya", "Neha",
-  "Rahul", "Amit", "Suresh", "Rajesh", "Vikram", "Sanjay", "Deepak", "Manoj",
   "Pooja", "Sunita", "Anjali", "Kavita", "Sneha", "Nisha", "Rekha", "Geeta",
 ];
 
@@ -15,7 +18,6 @@ const LAST_NAMES = [
 ];
 
 const AGE_OPTIONS = ["< 50 years", "> 50 years"];
-const GENDER_OPTIONS = ["Female", "Others", "Male"];
 const YES_NO_OPTIONS = ["Yes", "No"];
 
 const CLINICAL_CONDITIONS = [
@@ -41,14 +43,20 @@ function pickSome(items) {
   return shuffled.slice(0, count);
 }
 
-export function generateRandomIndianName() {
-  return `${pickOne(FIRST_NAMES)} ${pickOne(LAST_NAMES)}`;
+/** ~90% Male, ~10% Female */
+export function pickWeightedGender() {
+  return Math.random() < 0.9 ? "Male" : "Female";
 }
 
-export function generateRandomAnswers() {
+export function generateRandomIndianName(gender = pickWeightedGender()) {
+  const firstNames = gender === "Male" ? MALE_FIRST_NAMES : FEMALE_FIRST_NAMES;
+  return `${pickOne(firstNames)} ${pickOne(LAST_NAMES)}`;
+}
+
+export function generateRandomAnswers(gender = pickWeightedGender()) {
   return {
     age: pickOne(AGE_OPTIONS),
-    gender: pickOne(GENDER_OPTIONS),
+    gender,
     swellingBothLegs: pickOne(YES_NO_OPTIONS),
     swellingWorseEvening: pickOne(YES_NO_OPTIONS),
     swellingAllOverBody: pickOne(YES_NO_OPTIONS),
