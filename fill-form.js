@@ -98,10 +98,32 @@ function getRunCount(config) {
   return config.count ?? 1;
 }
 
-function getPerMinute(config) {
-  const fromEnv = Number(process.env.PER_MINUTE);
-  if (!Number.isNaN(fromEnv) && fromEnv > 0) return fromEnv;
-  return config.perMinute ?? 4;
+function randomInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function shuffleInPlace(items) {
+  for (let i = items.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [items[i], items[j]] = [items[j], items[i]];
+  }
+  return items;
+}
+
+/** Random rate band: min–max forms started per rolling minute. */
+function getPerMinuteRange(config) {
+  const envMin = Number(process.env.PER_MINUTE_MIN);
+  const envMax = Number(process.env.PER_MINUTE_MAX);
+  let min = Number(config.perMinuteMin ?? config.perMinute ?? 5);
+  let max = Number(config.perMinuteMax ?? config.perMinute ?? 14);
+
+  if (!Number.isNaN(envMin) && envMin > 0) min = envMin;
+  if (!Number.isNaN(envMax) && envMax > 0) max = envMax;
+
+  min = Math.max(1, Math.min(60, Math.floor(min)));
+  max = Math.max(1, Math.min(60, Math.floor(max)));
+  if (min > max) [min, max] = [max, min];
+  return { min, max };
 }
 
 /** Accept "48", "Promoter-48", comma/newline lists. Returns unique Promoter-N values. */
@@ -129,14 +151,17 @@ function resolvePromoterQueue(config) {
   if (fromList.length === 0) {
     throw new Error("At least one promoter is required (e.g. 48,49,53 or Promoter-3)");
   }
+  const shuffledPromoters = shuffleInPlace([...fromList]);
   const countPer = getRunCount(config);
   const queue = [];
-  for (const promoter of fromList) {
+  for (const promoter of shuffledPromoters) {
     for (let n = 1; n <= countPer; n++) {
       queue.push({ promoter, indexInPromoter: n, countPer });
     }
   }
-  return { promoters: fromList, countPer, queue };
+  // Shuffle fills so promoters are mixed (not one-by-one blocks)
+  shuffleInPlace(queue);
+  return { promoters: shuffledPromoters, countPer, queue };
 }
 
 /** Wait until fewer than `perMinute` runs have started in the last 60s. */
@@ -159,6 +184,18 @@ async function waitForRateLimit(recentStarts, perMinute, { shouldStop, onLog } =
     console.log(msg);
     await new Promise((resolve) => setTimeout(resolve, waitMs));
   }
+}
+
+/** Pick a random limit in [min,max] each time, then optionally small jitter. */
+async function waitForRandomRate(recentStarts, minPerMin, maxPerMin, { shouldStop, onLog } = {}) {
+  const limit = randomInt(minPerMin, maxPerMin);
+  await waitForRateLimit(recentStarts, limit, { shouldStop, onLog });
+  // Extra short jitter (0–2s) so starts aren't perfectly even
+  const jitterMs = randomInt(0, 2000);
+  if (jitterMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, jitterMs));
+  }
+  return limit;
 }
 
 function getLanguageId(data) {
@@ -260,8 +297,9 @@ export async function runBatch(config, options = {}) {
 
   const { promoters, countPer, queue } = resolvePromoterQueue(config);
   const runCount = queue.length;
-  const perMinute = getPerMinute(config);
-  const estimatedMinutes = Math.ceil(runCount / perMinute);
+  const { min: minPerMin, max: maxPerMin } = getPerMinuteRange(config);
+  const avgRate = (minPerMin + maxPerMin) / 2;
+  const estimatedMinutes = Math.ceil(runCount / avgRate);
 
   const log = (msg) => {
     onLog(msg);
@@ -269,14 +307,15 @@ export async function runBatch(config, options = {}) {
   };
 
   log(
-    `Starting ${runCount} form submission(s) | ${promoters.length} promoter(s) × ${countPer} | max ${perMinute}/minute (~${estimatedMinutes} min)...`
+    `Starting ${runCount} form submission(s) | ${promoters.length} promoter(s) × ${countPer} (shuffled) | random ${minPerMin}–${maxPerMin}/min (~${estimatedMinutes} min)...`
   );
-  log(`Promoters: ${promoters.join(", ")}`);
+  log(`Promoter order (shuffled): ${promoters.join(", ")}`);
 
   const browser = await chromium.launch({ headless });
   const results = [];
   let page = await browser.newPage();
   const recentStarts = [];
+  const doneByPromoter = Object.fromEntries(promoters.map((p) => [p, 0]));
 
   try {
     for (let i = 1; i <= runCount; i++) {
@@ -285,7 +324,10 @@ export async function runBatch(config, options = {}) {
         break;
       }
 
-      await waitForRateLimit(recentStarts, perMinute, { shouldStop, onLog });
+      const limit = await waitForRandomRate(recentStarts, minPerMin, maxPerMin, {
+        shouldStop,
+        onLog,
+      });
       if (shouldStop()) {
         log("Stopped by user.");
         break;
@@ -293,9 +335,12 @@ export async function runBatch(config, options = {}) {
       recentStarts.push(Date.now());
 
       const slot = queue[i - 1];
+      doneByPromoter[slot.promoter] = (doneByPromoter[slot.promoter] || 0) + 1;
       const data = buildRunData({ ...config, promoter: slot.promoter });
 
-      log(`\n--- Run ${i}/${runCount} | ${slot.promoter} (${slot.indexInPromoter}/${slot.countPer}) ---`);
+      log(
+        `\n--- Run ${i}/${runCount} | ${slot.promoter} (${doneByPromoter[slot.promoter]}/${slot.countPer}) | rate≈${limit}/min ---`
+      );
       log(`Name: ${data.fullName}`);
 
       try {

@@ -87,7 +87,8 @@ function loadDefaults() {
     language: "हिंदी",
     promoters: "",
     count: 1000,
-    perMinute: 4,
+    perMinuteMin: 5,
+    perMinuteMax: 14,
   };
 }
 
@@ -99,7 +100,8 @@ async function startJob(input) {
   const promotersRaw = String(input.promoters ?? input.promoter ?? "").trim();
   const promoters = parsePromoters(promotersRaw);
   const count = Number(input.count);
-  const perMinute = Number(input.perMinute);
+  const perMinuteMin = Number(input.perMinuteMin ?? input.perMinute ?? 5);
+  const perMinuteMax = Number(input.perMinuteMax ?? input.perMinute ?? 14);
   const language = String(input.language || "हिंदी").trim();
 
   if (promoters.length === 0) {
@@ -108,8 +110,14 @@ async function startJob(input) {
   if (!Number.isFinite(count) || count < 1 || count > 10000) {
     throw new Error("Count per promoter must be between 1 and 10000");
   }
-  if (!Number.isFinite(perMinute) || perMinute < 1 || perMinute > 60) {
-    throw new Error("Per minute must be between 1 and 60");
+  if (
+    !Number.isFinite(perMinuteMin) ||
+    !Number.isFinite(perMinuteMax) ||
+    perMinuteMin < 1 ||
+    perMinuteMax > 60 ||
+    perMinuteMin > perMinuteMax
+  ) {
+    throw new Error("Per-minute range must be 1–60 with min ≤ max");
   }
 
   const total = promoters.length * count;
@@ -117,7 +125,8 @@ async function startJob(input) {
     language,
     promoters,
     count,
-    perMinute,
+    perMinuteMin,
+    perMinuteMax,
     random: true,
   };
 
@@ -134,8 +143,9 @@ async function startJob(input) {
   job.results = [];
   job.error = null;
 
+  const avg = (perMinuteMin + perMinuteMax) / 2;
   pushLog(
-    `Job queued: ${promoters.length} promoters × ${count} = ${total} forms, ${perMinute}/min`
+    `Job queued: ${promoters.length} promoters × ${count} = ${total} forms, random ${perMinuteMin}–${perMinuteMax}/min (~${Math.ceil(total / avg)} min)`
   );
   pushLog(`Promoters: ${promoters.join(", ")}`);
 
@@ -249,7 +259,7 @@ const HTML = `<!DOCTYPE html>
     }
     .row {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1.2fr 1fr 1fr;
       gap: 0.85rem;
     }
     .actions {
@@ -360,8 +370,12 @@ const HTML = `<!DOCTYPE html>
           <input id="count" name="count" type="number" min="1" max="10000" value="1000" required />
         </div>
         <div class="field">
-          <label for="perMinute">Per minute</label>
-          <input id="perMinute" name="perMinute" type="number" min="1" max="60" value="4" required />
+          <label for="perMinuteMin">Min / min</label>
+          <input id="perMinuteMin" name="perMinuteMin" type="number" min="1" max="60" value="5" required />
+        </div>
+        <div class="field">
+          <label for="perMinuteMax">Max / min</label>
+          <input id="perMinuteMax" name="perMinuteMax" type="number" min="1" max="60" value="14" required />
         </div>
       </div>
       <p class="hint" id="totalHint" style="margin-top:-0.4rem;margin-bottom:1rem;"></p>
@@ -410,11 +424,14 @@ const HTML = `<!DOCTYPE html>
     function updateTotalHint() {
       const n = parseIds(form.promoters.value).length;
       const c = Number(form.count.value) || 0;
-      const pm = Number(form.perMinute.value) || 1;
+      const minR = Number(form.perMinuteMin.value) || 5;
+      const maxR = Number(form.perMinuteMax.value) || 14;
+      const avg = (minR + maxR) / 2 || 1;
       const total = n * c;
-      const mins = total ? Math.ceil(total / pm) : 0;
+      const mins = total ? Math.ceil(total / avg) : 0;
+      const hours = (mins / 60).toFixed(1);
       totalHint.textContent = n
-        ? "Total forms: " + total + " (" + n + " promoters × " + c + ") · ~" + mins + " min at " + pm + "/min"
+        ? "Total: " + total + " forms · shuffled · random " + minR + "–" + maxR + "/min · ~" + hours + " hours"
         : "Paste promoter ids above";
     }
 
@@ -424,7 +441,10 @@ const HTML = `<!DOCTYPE html>
       if (d.promoters) form.promoters.value = Array.isArray(d.promoters) ? d.promoters.join(",") : d.promoters;
       else if (d.promoter) form.promoters.value = d.promoter;
       if (d.count) form.count.value = d.count;
-      if (d.perMinute) form.perMinute.value = d.perMinute;
+      if (d.perMinuteMin) form.perMinuteMin.value = d.perMinuteMin;
+      else if (d.perMinute) form.perMinuteMin.value = d.perMinute;
+      if (d.perMinuteMax) form.perMinuteMax.value = d.perMinuteMax;
+      else if (d.perMinute) form.perMinuteMax.value = d.perMinute;
       if (d.language) form.language.value = d.language;
       updateTotalHint();
     }
@@ -440,7 +460,8 @@ const HTML = `<!DOCTYPE html>
       stopBtn.disabled = !running;
       form.promoters.disabled = running;
       form.count.disabled = running;
-      form.perMinute.disabled = running;
+      form.perMinuteMin.disabled = running;
+      form.perMinuteMax.disabled = running;
       form.language.disabled = running;
 
       if (running) setBadge("running");
@@ -473,7 +494,8 @@ const HTML = `<!DOCTYPE html>
 
     form.promoters.addEventListener("input", updateTotalHint);
     form.count.addEventListener("input", updateTotalHint);
-    form.perMinute.addEventListener("input", updateTotalHint);
+    form.perMinuteMin.addEventListener("input", updateTotalHint);
+    form.perMinuteMax.addEventListener("input", updateTotalHint);
 
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -481,7 +503,8 @@ const HTML = `<!DOCTYPE html>
       const payload = {
         promoters: form.promoters.value.trim(),
         count: Number(form.count.value),
-        perMinute: Number(form.perMinute.value),
+        perMinuteMin: Number(form.perMinuteMin.value),
+        perMinuteMax: Number(form.perMinuteMax.value),
         language: form.language.value,
       };
       const res = await fetch("/api/start", {
