@@ -1,0 +1,7 @@
+node_modules
+.git
+.cursor
+*.png
+error-run-*.png
+README.md
+.DS_Store

@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: form-bot
+    runtime: docker
+    plan: standard
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /
+    envVars:
+      - key: HEADLESS
+        value: "true"

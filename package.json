@@ -1,0 +1,16 @@
+{
+  "name": "edema-form-automation",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "fill": "node fill-form.js",
+    "fill:headless": "HEADLESS=true node fill-form.js",
+    "fill:batch": "node fill-form.js",
+    "fill:batch:headless": "HEADLESS=true node fill-form.js"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0"
+  }
+}
