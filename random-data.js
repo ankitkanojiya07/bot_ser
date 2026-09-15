@@ -113,9 +113,9 @@ function pickSome(items) {
   return shuffled.slice(0, count);
 }
 
-/** ~90% Male, ~10% Female */
+/** Independent fair draw per form. No batch-level gender sequence is imposed. */
 export function pickWeightedGender() {
-  return Math.random() < 0.9 ? "Male" : "Female";
+  return Math.random() < 0.5 ? "Male" : "Female";
 }
 
 export function generateRandomIndianName(gender = pickWeightedGender()) {

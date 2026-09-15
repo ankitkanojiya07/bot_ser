@@ -7,6 +7,7 @@ import { runBatch, parsePromoters } from "./fill-form.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
 const DATA_FILE = join(__dirname, "form-data.json");
+const FORM_URL = "https://seeedemaseekhelp.com/Ma_Vaishno_Devi/";
 
 const job = {
   running: false,
@@ -73,6 +74,29 @@ function getStatus() {
     results: job.results.slice(-50),
     error: job.error,
   };
+}
+
+async function getNetworkStatus() {
+  try {
+    const response = await fetch(FORM_URL, {
+      method: "HEAD",
+      signal: AbortSignal.timeout(5000),
+    });
+    return response.ok ? "online" : `unhealthy (${response.status})`;
+  } catch (error) {
+    return error.name === "TimeoutError" ? "timeout" : "offline";
+  }
+}
+
+async function getProgressText() {
+  const network = await getNetworkStatus();
+  return [
+    `Progress: ${job.current}/${job.total}`,
+    `Success: ${job.succeeded}`,
+    `Failed: ${job.failed}`,
+    `Running: ${job.running ? "yes" : "no"}`,
+    `Network: ${network}`,
+  ].join("\n") + "\n";
 }
 
 function loadDefaults() {
@@ -143,9 +167,9 @@ async function startJob(input) {
   job.results = [];
   job.error = null;
 
-  const avg = (perMinuteMin + perMinuteMax) / 2;
+  const avg = ((perMinuteMin + perMinuteMax) / 2) * promoters.length;
   pushLog(
-    `Job queued: ${promoters.length} promoters × ${count} = ${total} forms, random ${perMinuteMin}–${perMinuteMax}/min (~${Math.ceil(total / avg)} min)`
+    `Job queued: ${promoters.length} promoters × ${count} = ${total} forms, random ${perMinuteMin}–${perMinuteMax} per promoter/min (${perMinuteMin * promoters.length}–${perMinuteMax * promoters.length} total/min, ~${Math.ceil(total / avg)} min)`
   );
   pushLog(`Promoters: ${promoters.join(", ")}`);
 
@@ -370,11 +394,11 @@ const HTML = `<!DOCTYPE html>
           <input id="count" name="count" type="number" min="1" max="10000" value="1000" required />
         </div>
         <div class="field">
-          <label for="perMinuteMin">Min / min</label>
+          <label for="perMinuteMin">Min per promoter / min</label>
           <input id="perMinuteMin" name="perMinuteMin" type="number" min="1" max="60" value="5" required />
         </div>
         <div class="field">
-          <label for="perMinuteMax">Max / min</label>
+          <label for="perMinuteMax">Max per promoter / min</label>
           <input id="perMinuteMax" name="perMinuteMax" type="number" min="1" max="60" value="14" required />
         </div>
       </div>
@@ -426,12 +450,12 @@ const HTML = `<!DOCTYPE html>
       const c = Number(form.count.value) || 0;
       const minR = Number(form.perMinuteMin.value) || 5;
       const maxR = Number(form.perMinuteMax.value) || 14;
-      const avg = (minR + maxR) / 2 || 1;
+      const avg = ((minR + maxR) / 2) * n || 1;
       const total = n * c;
       const mins = total ? Math.ceil(total / avg) : 0;
       const hours = (mins / 60).toFixed(1);
       totalHint.textContent = n
-        ? "Total: " + total + " forms · shuffled · random " + minR + "–" + maxR + "/min · ~" + hours + " hours"
+        ? "Total: " + total + " forms · random " + minR + "–" + maxR + " per promoter/min (" + (minR * n) + "–" + (maxR * n) + " total) · ~" + hours + " hours"
         : "Paste promoter ids above";
     }
 
@@ -545,6 +569,12 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/api/status") {
       sendJson(res, 200, getStatus());
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/progress") {
+      res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end(await getProgressText());
       return;
     }
 

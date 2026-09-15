@@ -63,16 +63,16 @@ COUNT=50 PER_MINUTE=4 npm run fill:batch:headless
 
 ## Batch flow
 
-- **`count`** — total forms to fill
-- **`perMinute`** — max starts in any rolling 60s window
+- **`count`** — forms to fill for each promoter
+- **`perMinute`** — random starts for each promoter in every 60-second batch. For example, 7 promoters and a rate of 2 start 14 forms simultaneously.
 
 After each submission (except the last), the script opens **Report View** → **Back to form**, then continues.
 
 | Field | Description |
 |-------|-------------|
 | `promoter` | Must match a `<select>` option on the form (e.g. `Promoter-3`) |
-| `count` | Total forms to submit |
-| `perMinute` | Max forms started per rolling minute |
+| `count` | Forms to submit for each promoter |
+| `perMinute` | Forms started per promoter in each 60-second batch |
 | `language` | `हिंदी` or `English` (others need form-value config) |
 
 ## Form steps

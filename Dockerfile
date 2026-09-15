@@ -6,8 +6,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-COPY fill-form.js random-data.js server.js form-data.example.json ./
-RUN cp form-data.example.json form-data.json
+COPY fill-form.js random-data.js server.js form-data.json form-data.example.json ./
 
 ENV HEADLESS=true
 ENV PORT=3000
