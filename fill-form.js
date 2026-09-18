@@ -9,29 +9,38 @@ import {
 } from "./random-data.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const FORM_URL = "https://seeedemaseekhelp.com/Ma_Vaishno_Devi/";
+export const DEFAULT_FORM_URL =
+  "https://seeedemaseekhelp.com/Weekend_Activity_4/";
 const DATA_FILE = join(__dirname, "form-data.json");
 
 const LANGUAGES = {
   English: "3",
-  "অসমীয়া": "1",
-  "বাঙ্গালি": "2",
-  "ગુજરાતી": "4",
-  "हिंदी": "5",
-  "ಕನ್ನಡ": "6",
-  "മലയാളം": "7",
-  "मराठी": "8",
-  "ଓଡ଼ିଆ": "9",
-  "ਪੰਜਾਬੀ": "10",
-  "தமிழ்": "11",
-  "తెలుగు": "12",
+  অসমীয়া: "1",
+  বাঙ্গালি: "2",
+  ગુજરાતી: "4",
+  हिंदी: "5",
+  ಕನ್ನಡ: "6",
+  മലയാളം: "7",
+  मराठी: "8",
+  ଓଡ଼ିଆ: "9",
+  ਪੰਜਾਬੀ: "10",
+  தமிழ்: "11",
+  తెలుగు: "12",
 };
 
 const LANGUAGE_FORMS = {
-  "3": {
+  3: {
     age: { "< 50 years": "21-0-0", "> 50 years": "21-1-1" },
     gender: { Female: "22-0-1", Others: "22-1-1", Male: "22-2-1" },
-    yesNo: { qst_2: "23", qst_3: "24", qst_4: "25", qst_5: "26", qst_6: "27", qst_7: "28", qst_8: "29" },
+    yesNo: {
+      qst_2: "23",
+      qst_3: "24",
+      qst_4: "25",
+      qst_5: "26",
+      qst_6: "27",
+      qst_7: "28",
+      qst_8: "29",
+    },
     clinicalConditions: {
       Diabetes: "30-0-1",
       "High Blood pressure": "30-1-1",
@@ -44,10 +53,18 @@ const LANGUAGE_FORMS = {
       "Endocrine disease  (e.g.Thyroid disease)": "121-2-1",
     },
   },
-  "5": {
-    age: { "< 50 years": "41-0-0", "> 50 years": "41-1-1" },
+  5: {
+    age: { "< 50 years": "41-1-0", "> 50 years": "41-0-1" },
     gender: { Male: "42-0-1", Female: "42-1-1", Others: "42-2-1" },
-    yesNo: { qst_2: "43", qst_3: "44", qst_4: "45", qst_5: "46", qst_6: "47", qst_7: "48", qst_8: "49" },
+    yesNo: {
+      qst_2: "43",
+      qst_3: "44",
+      qst_4: "45",
+      qst_5: "46",
+      qst_6: "47",
+      qst_7: "48",
+      qst_8: "49",
+    },
     clinicalConditions: {
       Diabetes: "50-0-1",
       "High Blood pressure": "50-1-1",
@@ -79,7 +96,7 @@ const YES_NO = { Yes: "1", No: "0" };
 function loadConfig() {
   if (!existsSync(DATA_FILE)) {
     throw new Error(
-      `Missing ${DATA_FILE}. Copy form-data.example.json to form-data.json and edit your values.`
+      `Missing ${DATA_FILE}. Copy form-data.example.json to form-data.json and edit your values.`,
     );
   }
   return JSON.parse(readFileSync(DATA_FILE, "utf8"));
@@ -156,7 +173,9 @@ export function parsePromoters(input) {
 function resolvePromoters(config) {
   const fromList = parsePromoters(config.promoters ?? config.promoter ?? "");
   if (fromList.length === 0) {
-    throw new Error("At least one promoter is required (e.g. 48,49,53 or Promoter-3)");
+    throw new Error(
+      "At least one promoter is required (e.g. 48,49,53 or Promoter-3)",
+    );
   }
   const shuffledPromoters = shuffleInPlace([...fromList]);
   const countPer = getRunCount(config);
@@ -182,7 +201,9 @@ function getLanguageId(data) {
 function getFormConfig(languageId) {
   const config = LANGUAGE_FORMS[languageId];
   if (!config) {
-    throw new Error(`Form values for language id "${languageId}" are not configured yet.`);
+    throw new Error(
+      `Form values for language id "${languageId}" are not configured yet.`,
+    );
   }
   return config;
 }
@@ -210,23 +231,34 @@ async function fillStep2(page, data) {
   await page.selectOption('select[name="promoter"]', data.promoter);
 
   for (const [fieldName, answerKey] of RADIO_FIELDS) {
-    const value = resolveRadioValue(formConfig, fieldName, answerKey, answers[answerKey]);
+    const value = resolveRadioValue(
+      formConfig,
+      fieldName,
+      answerKey,
+      answers[answerKey],
+    );
     if (!value) {
       throw new Error(`Unknown answer for ${answerKey}: ${answers[answerKey]}`);
     }
-    await page.locator(`input[name="${fieldName}"][value="${value}"]`).check({ force: true });
+    await page
+      .locator(`input[name="${fieldName}"][value="${value}"]`)
+      .check({ force: true });
   }
 
   for (const condition of answers.clinicalConditions ?? []) {
     const value = formConfig.clinicalConditions[condition];
     if (!value) throw new Error(`Unknown clinical condition: ${condition}`);
-    await page.locator(`input[name="qst_9[]"][value="${value}"]`).check({ force: true });
+    await page
+      .locator(`input[name="qst_9[]"][value="${value}"]`)
+      .check({ force: true });
   }
 
   for (const disorder of answers.disorders ?? []) {
     const value = formConfig.disorders[disorder];
     if (!value) throw new Error(`Unknown disorder: ${disorder}`);
-    await page.locator(`input[name="qst_10[]"][value="${value}"]`).check({ force: true });
+    await page
+      .locator(`input[name="qst_10[]"][value="${value}"]`)
+      .check({ force: true });
   }
 
   await page.locator("#checkbox").check();
@@ -234,9 +266,15 @@ async function fillStep2(page, data) {
   await page.waitForSelector('a[href*="report_view"]', { timeout: 15000 });
 }
 
+function resolveFormUrl(data) {
+  const url = String(data?.formUrl || DEFAULT_FORM_URL).trim();
+  if (!url) return DEFAULT_FORM_URL;
+  return url;
+}
+
 async function fillForm(page, data, { isFirstRun }) {
   if (isFirstRun) {
-    await page.goto(FORM_URL, { waitUntil: "networkidle" });
+    await page.goto(resolveFormUrl(data), { waitUntil: "networkidle" });
   }
 
   await fillStep1(page, data);
@@ -246,7 +284,7 @@ async function fillForm(page, data, { isFirstRun }) {
 
 /**
  * Run a batch of form submissions.
- * @param {object} config - { language, promoter|promoters, count (per promoter), perMinuteMin, perMinuteMax, random? }
+ * @param {object} config - { formUrl?, language, promoter|promoters, count (per promoter), perMinuteMin, perMinuteMax, random? }
  * @param {object} options - { headless?, onLog?, onProgress?, shouldStop? }
  */
 export async function runBatch(config, options = {}) {
@@ -270,8 +308,9 @@ export async function runBatch(config, options = {}) {
   };
 
   log(
-    `Starting ${runCount} form submission(s) | ${promoters.length} promoter(s) × ${countPer} | random ${minPerMin}–${maxPerMin} per promoter/min (${minPerMin * promoters.length}–${maxPerMin * promoters.length} total, ~${estimatedMinutes} min)...`
+    `Starting ${runCount} form submission(s) | ${promoters.length} promoter(s) × ${countPer} | random ${minPerMin}–${maxPerMin} per promoter/min (${minPerMin * promoters.length}–${maxPerMin * promoters.length} total, ~${estimatedMinutes} min)...`,
   );
+  log(`Form URL: ${resolveFormUrl(config)}`);
   log(`Promoter order (shuffled): ${promoters.join(", ")}`);
 
   const browser = await chromium.launch({ headless });
@@ -293,19 +332,28 @@ export async function runBatch(config, options = {}) {
       for (const promoter of promoters) {
         const remaining = countPer - doneByPromoter[promoter];
         for (let n = 1; n <= Math.min(perPromoterBatchSize, remaining); n++) {
-          batch.push({ promoter, indexInPromoter: doneByPromoter[promoter] + n, countPer });
+          batch.push({
+            promoter,
+            indexInPromoter: doneByPromoter[promoter] + n,
+            countPer,
+          });
         }
       }
       const batchStartedAt = Date.now();
-      log(`\n--- Batch ${batchNumber}: ${perPromoterBatchSize} per promoter, launching ${batch.length} form(s) simultaneously ---`);
+      log(
+        `\n--- Batch ${batchNumber}: ${perPromoterBatchSize} per promoter, launching ${batch.length} form(s) simultaneously ---`,
+      );
 
       await Promise.all(
         batch.map(async (slot, index) => {
           const run = offset + index + 1;
-          doneByPromoter[slot.promoter] = (doneByPromoter[slot.promoter] || 0) + 1;
+          doneByPromoter[slot.promoter] =
+            (doneByPromoter[slot.promoter] || 0) + 1;
           const data = buildRunData({ ...config, promoter: slot.promoter });
 
-          log(`Run ${run}/${runCount} | ${slot.promoter} (${doneByPromoter[slot.promoter]}/${slot.countPer}) | ${data.answers?.gender ?? "configured data"}`);
+          log(
+            `Run ${run}/${runCount} | ${slot.promoter} (${doneByPromoter[slot.promoter]}/${slot.countPer}) | ${data.answers?.gender ?? "configured data"}`,
+          );
           let lastError;
           for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt += 1) {
             let page;
@@ -320,14 +368,18 @@ export async function runBatch(config, options = {}) {
                 url: page.url(),
               };
               results.push(result);
-              log(`Run ${run} done${attempt > 1 ? ` on retry ${attempt - 1}` : ""}: ${page.url()}`);
+              log(
+                `Run ${run} done${attempt > 1 ? ` on retry ${attempt - 1}` : ""}: ${page.url()}`,
+              );
               lastError = null;
               break;
             } catch (error) {
               if (error.message === "Stopped by user") throw error;
               lastError = error;
               if (attempt <= MAX_RETRIES) {
-                onLog(`Run ${run} failed (attempt ${attempt}); retrying (${MAX_RETRIES - attempt} retries left): ${error.message}`);
+                onLog(
+                  `Run ${run} failed (attempt ${attempt}); retrying (${MAX_RETRIES - attempt} retries left): ${error.message}`,
+                );
               }
             } finally {
               await page?.close().catch(() => {});
@@ -343,8 +395,12 @@ export async function runBatch(config, options = {}) {
               error: lastError.message,
             };
             results.push(result);
-            console.error(`Run ${run} failed after ${MAX_RETRIES} retries: ${lastError.message}`);
-            onLog(`Run ${run} failed after ${MAX_RETRIES} retries: ${lastError.message}`);
+            console.error(
+              `Run ${run} failed after ${MAX_RETRIES} retries: ${lastError.message}`,
+            );
+            onLog(
+              `Run ${run} failed after ${MAX_RETRIES} retries: ${lastError.message}`,
+            );
           }
 
           completed += 1;
@@ -352,13 +408,16 @@ export async function runBatch(config, options = {}) {
           if (lastError) {
             try {
               const errorPage = await browser.newPage();
-              await errorPage.screenshot({ path: join(__dirname, `error-run-${run}.png`), fullPage: true });
+              await errorPage.screenshot({
+                path: join(__dirname, `error-run-${run}.png`),
+                fullPage: true,
+              });
               await errorPage.close();
             } catch {
               /* ignore screenshot errors */
             }
           }
-        })
+        }),
       );
 
       offset += batch.length;
@@ -380,12 +439,23 @@ export async function runBatch(config, options = {}) {
   log("\n=== Summary ===");
   log(`Total: ${results.length} | Success: ${succeeded} | Failed: ${failed}`);
   for (const promoter of promoters) {
-    const ok = results.filter((r) => r.promoter === promoter && r.status === "success").length;
-    const bad = results.filter((r) => r.promoter === promoter && r.status === "failed").length;
+    const ok = results.filter(
+      (r) => r.promoter === promoter && r.status === "success",
+    ).length;
+    const bad = results.filter(
+      (r) => r.promoter === promoter && r.status === "failed",
+    ).length;
     log(`  ${promoter}: success ${ok} | failed ${bad}`);
   }
 
-  return { results, succeeded, failed, total: results.length, promoters, countPer };
+  return {
+    results,
+    succeeded,
+    failed,
+    total: results.length,
+    promoters,
+    countPer,
+  };
 }
 
 async function main() {

@@ -1,8 +1,9 @@
 {
+  "formUrl": "https://seeedemaseekhelp.com/Weekend_Activity_4/",
   "language": "हिंदी",
-  "promoters": "9,12,17,19,26,28,30",
+  "promoters": "21,22,23,24",
   "random": true,
-  "count": 800,
+  "count": 210,
   "perMinuteMin": 2,
   "perMinuteMax": 4
 }

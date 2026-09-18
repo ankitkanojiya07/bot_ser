@@ -2,12 +2,11 @@ import { createServer } from "http";
 import { readFileSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
-import { runBatch, parsePromoters } from "./fill-form.js";
+import { runBatch, parsePromoters, DEFAULT_FORM_URL } from "./fill-form.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
 const DATA_FILE = join(__dirname, "form-data.json");
-const FORM_URL = "https://seeedemaseekhelp.com/Ma_Vaishno_Devi/";
 
 const job = {
   running: false,
@@ -76,9 +75,24 @@ function getStatus() {
   };
 }
 
-async function getNetworkStatus() {
+function normalizeFormUrl(input) {
+  const url = String(input || "").trim() || DEFAULT_FORM_URL;
+  let parsed;
   try {
-    const response = await fetch(FORM_URL, {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("Form URL must be a valid http(s) link");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Form URL must start with http:// or https://");
+  }
+  return parsed.href;
+}
+
+async function getNetworkStatus() {
+  const url = job.config?.formUrl || DEFAULT_FORM_URL;
+  try {
+    const response = await fetch(url, {
       method: "HEAD",
       signal: AbortSignal.timeout(5000),
     });
@@ -90,30 +104,34 @@ async function getNetworkStatus() {
 
 async function getProgressText() {
   const network = await getNetworkStatus();
-  return [
-    `Progress: ${job.current}/${job.total}`,
-    `Success: ${job.succeeded}`,
-    `Failed: ${job.failed}`,
-    `Running: ${job.running ? "yes" : "no"}`,
-    `Network: ${network}`,
-  ].join("\n") + "\n";
+  return (
+    [
+      `Progress: ${job.current}/${job.total}`,
+      `Success: ${job.succeeded}`,
+      `Failed: ${job.failed}`,
+      `Running: ${job.running ? "yes" : "no"}`,
+      `Network: ${network}`,
+    ].join("\n") + "\n"
+  );
 }
 
 function loadDefaults() {
-  if (existsSync(DATA_FILE)) {
-    try {
-      return JSON.parse(readFileSync(DATA_FILE, "utf8"));
-    } catch {
-      /* ignore */
-    }
-  }
-  return {
+  const defaults = {
+    formUrl: DEFAULT_FORM_URL,
     language: "हिंदी",
     promoters: "",
     count: 1000,
     perMinuteMin: 5,
     perMinuteMax: 14,
   };
+  if (existsSync(DATA_FILE)) {
+    try {
+      return { ...defaults, ...JSON.parse(readFileSync(DATA_FILE, "utf8")) };
+    } catch {
+      /* ignore */
+    }
+  }
+  return defaults;
 }
 
 async function startJob(input) {
@@ -121,6 +139,7 @@ async function startJob(input) {
     throw new Error("A job is already running");
   }
 
+  const formUrl = normalizeFormUrl(input.formUrl);
   const promotersRaw = String(input.promoters ?? input.promoter ?? "").trim();
   const promoters = parsePromoters(promotersRaw);
   const count = Number(input.count);
@@ -146,6 +165,7 @@ async function startJob(input) {
 
   const total = promoters.length * count;
   const config = {
+    formUrl,
     language,
     promoters,
     count,
@@ -169,8 +189,9 @@ async function startJob(input) {
 
   const avg = ((perMinuteMin + perMinuteMax) / 2) * promoters.length;
   pushLog(
-    `Job queued: ${promoters.length} promoters × ${count} = ${total} forms, random ${perMinuteMin}–${perMinuteMax} per promoter/min (${perMinuteMin * promoters.length}–${perMinuteMax * promoters.length} total/min, ~${Math.ceil(total / avg)} min)`
+    `Job queued: ${promoters.length} promoters × ${count} = ${total} forms, random ${perMinuteMin}–${perMinuteMax} per promoter/min (${perMinuteMin * promoters.length}–${perMinuteMax * promoters.length} total/min, ~${Math.ceil(total / avg)} min)`,
   );
+  pushLog(`Form URL: ${formUrl}`);
   pushLog(`Promoters: ${promoters.join(", ")}`);
 
   // Run in background
@@ -380,9 +401,14 @@ const HTML = `<!DOCTYPE html>
 <body>
   <main>
     <h1>Form Bot</h1>
-    <p class="sub">Paste promoter ids, set count per promoter and rate — runs all in one job.</p>
+    <p class="sub">Paste the form URL, promoter ids, set count per promoter and rate — runs all in one job.</p>
 
     <form id="jobForm">
+      <div class="field">
+        <label for="formUrl">Form URL</label>
+        <input id="formUrl" name="formUrl" type="url" value="https://seeedemaseekhelp.com/Weekend_Activity_4/" placeholder="https://seeedemaseekhelp.com/Weekend_Activity_4/" required />
+        <p class="hint">The page the bot opens for each run. Change this anytime from the UI.</p>
+      </div>
       <div class="field">
         <label for="promoters">Promoter IDs</label>
         <textarea id="promoters" name="promoters" placeholder="48,49,53,54,57" required></textarea>
@@ -462,6 +488,7 @@ const HTML = `<!DOCTYPE html>
     async function loadDefaults() {
       const res = await fetch("/api/defaults");
       const d = await res.json();
+      if (d.formUrl) form.formUrl.value = d.formUrl;
       if (d.promoters) form.promoters.value = Array.isArray(d.promoters) ? d.promoters.join(",") : d.promoters;
       else if (d.promoter) form.promoters.value = d.promoter;
       if (d.count) form.count.value = d.count;
@@ -482,6 +509,7 @@ const HTML = `<!DOCTYPE html>
       const running = status.running;
       startBtn.disabled = running;
       stopBtn.disabled = !running;
+      form.formUrl.disabled = running;
       form.promoters.disabled = running;
       form.count.disabled = running;
       form.perMinuteMin.disabled = running;
@@ -525,6 +553,7 @@ const HTML = `<!DOCTYPE html>
       e.preventDefault();
       startBtn.disabled = true;
       const payload = {
+        formUrl: form.formUrl.value.trim(),
         promoters: form.promoters.value.trim(),
         count: Number(form.count.value),
         perMinuteMin: Number(form.perMinuteMin.value),
