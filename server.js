@@ -2,7 +2,7 @@ import { createServer } from "http";
 import { readFileSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
-import { runBatch, parsePromoters, DEFAULT_FORM_URL } from "./fill-form.js";
+import { runBatch, parsePromoterTargets, DEFAULT_FORM_URL } from "./fill-form.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
@@ -21,12 +21,24 @@ const job = {
   logs: [],
   results: [],
   error: null,
+  campaignProgress: [],
 };
 
 function pushLog(msg) {
   const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
   job.logs.push(line);
-  if (job.logs.length > 500) job.logs.shift();
+  if (job.logs.length > 2000) job.logs.shift();
+  console.log(line);
+}
+
+function formShortName(url) {
+  try {
+    const parsed = new URL(url);
+    const last = parsed.pathname.replace(/\/+$/, "").split("/").filter(Boolean).pop();
+    return last || parsed.host;
+  } catch {
+    return url;
+  }
 }
 
 function readJsonBody(req) {
@@ -72,6 +84,7 @@ function getStatus() {
     logs: job.logs,
     results: job.results.slice(-50),
     error: job.error,
+    campaignProgress: job.campaignProgress,
   };
 }
 
@@ -89,8 +102,41 @@ function normalizeFormUrl(input) {
   return parsed.href;
 }
 
+function parseCampaigns(input) {
+  const items =
+    Array.isArray(input.campaigns) && input.campaigns.length > 0
+      ? input.campaigns
+      : [
+          {
+            formUrl: input.formUrl,
+            promoters: input.promoters ?? input.promoter,
+          },
+        ];
+  const fallbackCount = Number(input.count);
+
+  return items.map((item, index) => {
+    const formUrl = normalizeFormUrl(item?.formUrl);
+    let promoters;
+    try {
+      promoters = parsePromoterTargets(
+        item?.promoters ?? item?.promoter ?? "",
+        Number.isFinite(fallbackCount) && fallbackCount >= 1
+          ? fallbackCount
+          : undefined,
+      );
+    } catch (error) {
+      throw new Error(`Form ${index + 1}: ${error.message}`);
+    }
+    if (promoters.length === 0) {
+      throw new Error(`Form ${index + 1}: enter at least one promoter id and count`);
+    }
+    return { formUrl, promoters };
+  });
+}
+
 async function getNetworkStatus() {
-  const url = job.config?.formUrl || DEFAULT_FORM_URL;
+  const url =
+    job.config?.campaigns?.[0]?.formUrl || job.config?.formUrl || DEFAULT_FORM_URL;
   try {
     const response = await fetch(url, {
       method: "HEAD",
@@ -123,10 +169,21 @@ function loadDefaults() {
     count: 1000,
     perMinuteMin: 5,
     perMinuteMax: 14,
+    campaigns: [{ formUrl: DEFAULT_FORM_URL, promoters: [{ id: "", count: "" }] }],
   };
   if (existsSync(DATA_FILE)) {
     try {
-      return { ...defaults, ...JSON.parse(readFileSync(DATA_FILE, "utf8")) };
+      const saved = JSON.parse(readFileSync(DATA_FILE, "utf8"));
+      const merged = { ...defaults, ...saved };
+      if (!Array.isArray(saved.campaigns) || saved.campaigns.length === 0) {
+        merged.campaigns = [
+          {
+            formUrl: saved.formUrl || DEFAULT_FORM_URL,
+            promoters: saved.promoters || saved.promoter || "",
+          },
+        ];
+      }
+      return merged;
     } catch {
       /* ignore */
     }
@@ -139,20 +196,11 @@ async function startJob(input) {
     throw new Error("A job is already running");
   }
 
-  const formUrl = normalizeFormUrl(input.formUrl);
-  const promotersRaw = String(input.promoters ?? input.promoter ?? "").trim();
-  const promoters = parsePromoters(promotersRaw);
-  const count = Number(input.count);
+  const campaigns = parseCampaigns(input);
   const perMinuteMin = Number(input.perMinuteMin ?? input.perMinute ?? 5);
   const perMinuteMax = Number(input.perMinuteMax ?? input.perMinute ?? 14);
   const language = String(input.language || "हिंदी").trim();
 
-  if (promoters.length === 0) {
-    throw new Error("Enter at least one promoter id (e.g. 48,49,53)");
-  }
-  if (!Number.isFinite(count) || count < 1 || count > 10000) {
-    throw new Error("Count per promoter must be between 1 and 10000");
-  }
   if (
     !Number.isFinite(perMinuteMin) ||
     !Number.isFinite(perMinuteMax) ||
@@ -163,12 +211,20 @@ async function startJob(input) {
     throw new Error("Per-minute range must be 1–60 with min ≤ max");
   }
 
-  const total = promoters.length * count;
+  const campaignTotal = (campaign) =>
+    campaign.promoters.reduce((sum, item) => sum + item.count, 0);
+  const total = campaigns.reduce((sum, campaign) => sum + campaignTotal(campaign), 0);
+  const avgRate = campaigns.reduce(
+    (sum, campaign) =>
+      sum + ((perMinuteMin + perMinuteMax) / 2) * campaign.promoters.length,
+    0,
+  );
+  const estimatedMinutes = Math.ceil(total / Math.max(avgRate, 1));
   const config = {
-    formUrl,
+    campaigns,
+    formUrl: campaigns[0].formUrl,
     language,
-    promoters,
-    count,
+    promoters: campaigns[0].promoters,
     perMinuteMin,
     perMinuteMax,
     random: true,
@@ -186,40 +242,122 @@ async function startJob(input) {
   job.logs = [];
   job.results = [];
   job.error = null;
+  job.campaignProgress = campaigns.map((campaign, index) => ({
+    index,
+    formUrl: campaign.formUrl,
+    name: formShortName(campaign.formUrl),
+    promoters: campaign.promoters,
+    promoterSummary: campaign.promoters
+      .map((item) => `${String(item.promoter).replace(/^Promoter-/i, "")}×${item.count}`)
+      .join(", "),
+    total: campaignTotal(campaign),
+    current: 0,
+    succeeded: 0,
+    failed: 0,
+    status: "queued",
+  }));
 
-  const avg = ((perMinuteMin + perMinuteMax) / 2) * promoters.length;
   pushLog(
-    `Job queued: ${promoters.length} promoters × ${count} = ${total} forms, random ${perMinuteMin}–${perMinuteMax} per promoter/min (${perMinuteMin * promoters.length}–${perMinuteMax * promoters.length} total/min, ~${Math.ceil(total / avg)} min)`,
+    `Job queued: ${campaigns.length} form(s) in parallel, ${total} total submissions (~${estimatedMinutes} min)`,
   );
-  pushLog(`Form URL: ${formUrl}`);
-  pushLog(`Promoters: ${promoters.join(", ")}`);
+  campaigns.forEach((campaign, index) => {
+    pushLog(
+      `Form ${index + 1}: ${campaign.formUrl} | ${campaign.promoters
+        .map((item) => `${item.promoter}×${item.count}`)
+        .join(", ")} | ${campaignTotal(campaign)} forms`,
+    );
+  });
 
   // Run in background
   setImmediate(async () => {
+    const resultsByCampaign = campaigns.map(() => []);
+
+    const refreshTotals = () => {
+      job.current = job.campaignProgress.reduce((sum, item) => sum + (item.current || 0), 0);
+      job.succeeded = job.campaignProgress.reduce(
+        (sum, item) => sum + (item.succeeded || 0),
+        0,
+      );
+      job.failed = job.campaignProgress.reduce((sum, item) => sum + (item.failed || 0), 0);
+      job.results = resultsByCampaign.flat();
+    };
+
     try {
-      const summary = await runBatch(config, {
-        headless: true,
-        shouldStop: () => job.stopRequested,
-        onLog: (msg) => pushLog(String(msg).trimEnd()),
-        onProgress: ({ current, total: t, results }) => {
-          job.current = current;
-          job.total = t;
-          job.results = results;
-          job.succeeded = results.filter((r) => r.status === "success").length;
-          job.failed = results.filter((r) => r.status === "failed").length;
-        },
-      });
-      job.succeeded = summary.succeeded;
-      job.failed = summary.failed;
-      job.results = summary.results;
-      job.current = summary.total;
+      await Promise.all(
+        campaigns.map(async (campaign, i) => {
+          if (job.stopRequested) {
+            job.campaignProgress[i].status = "stopped";
+            return;
+          }
+          job.campaignProgress[i].status = "running";
+          pushLog(
+            `Starting form ${i + 1}/${campaigns.length} in parallel: ${campaign.formUrl} (${campaignTotal(campaign)} submissions)`,
+          );
+          try {
+            const summary = await runBatch(
+              {
+                formUrl: campaign.formUrl,
+                language,
+                promoters: campaign.promoters,
+                perMinuteMin,
+                perMinuteMax,
+                random: true,
+              },
+              {
+                headless: true,
+                shouldStop: () => job.stopRequested,
+                onLog: (msg) => pushLog(String(msg).trimEnd()),
+                onProgress: ({ current, results }) => {
+                  resultsByCampaign[i] = results;
+                  job.campaignProgress[i].current = current;
+                  job.campaignProgress[i].succeeded = results.filter(
+                    (r) => r.status === "success",
+                  ).length;
+                  job.campaignProgress[i].failed = results.filter(
+                    (r) => r.status === "failed",
+                  ).length;
+                  refreshTotals();
+                },
+              },
+            );
+            resultsByCampaign[i] = summary.results;
+            job.campaignProgress[i].current = summary.total;
+            job.campaignProgress[i].succeeded = summary.succeeded;
+            job.campaignProgress[i].failed = summary.failed;
+            job.campaignProgress[i].status = job.stopRequested ? "stopped" : "done";
+            refreshTotals();
+            pushLog(
+              `Form ${i + 1}/${campaigns.length} (${formShortName(campaign.formUrl)}) finished: success ${summary.succeeded} | failed ${summary.failed}.`,
+            );
+          } catch (error) {
+            if (error.message === "Stopped by user") {
+              job.campaignProgress[i].status = "stopped";
+              pushLog(
+                `Form ${i + 1}/${campaigns.length} stopped: ${error.message}`,
+              );
+              return;
+            }
+            job.campaignProgress[i].status = "error";
+            pushLog(
+              `Form ${i + 1}/${campaigns.length} (${formShortName(campaign.formUrl)}) failed: ${error.message}. Other forms keep running.`,
+            );
+            refreshTotals();
+          }
+        }),
+      );
     } catch (error) {
       job.error = error.message;
       pushLog(`Fatal: ${error.message}`);
     } finally {
       job.running = false;
       job.finishedAt = new Date().toISOString();
-      pushLog("Job finished.");
+      job.campaignProgress.forEach((item) => {
+        if (item.status === "queued" || item.status === "running") {
+          item.status = job.stopRequested ? "stopped" : item.status;
+        }
+      });
+      refreshTotals();
+      pushLog("All forms finished.");
     }
   });
 }
@@ -253,7 +391,7 @@ const HTML = `<!DOCTYPE html>
       padding: 2rem 1rem 3rem;
     }
     main {
-      max-width: 640px;
+      max-width: 760px;
       margin: 0 auto;
     }
     h1 {
@@ -304,7 +442,7 @@ const HTML = `<!DOCTYPE html>
     }
     .row {
       display: grid;
-      grid-template-columns: 1.2fr 1fr 1fr;
+      grid-template-columns: 1fr 1fr;
       gap: 0.85rem;
     }
     .actions {
@@ -379,6 +517,28 @@ const HTML = `<!DOCTYPE html>
       background: linear-gradient(90deg, var(--accent), var(--ok));
       transition: width 0.3s ease;
     }
+    #campaignStatus {
+      display: flex;
+      flex-direction: column;
+      gap: 0.45rem;
+      margin: 0 0 1rem;
+    }
+    .c-stat {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.75rem;
+      align-items: center;
+      background: var(--bg);
+      border-radius: 8px;
+      padding: 0.55rem 0.75rem;
+      font-size: 0.8rem;
+    }
+    .c-stat .c-name { color: var(--text); font-weight: 600; }
+    .c-stat .c-meta { color: var(--muted); }
+    .c-stat.queued .c-state { color: var(--muted); }
+    .c-stat.running .c-state { color: var(--accent); }
+    .c-stat.done .c-state { color: var(--ok); }
+    .c-stat.error .c-state, .c-stat.stopped .c-state { color: var(--danger); }
     #logs {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 0.72rem;
@@ -392,6 +552,68 @@ const HTML = `<!DOCTYPE html>
       color: #b8c4d4;
     }
     .hint { font-size: 0.75rem; color: var(--muted); margin-top: 0.35rem; }
+    .campaigns { display: flex; flex-direction: column; gap: 0.85rem; margin-bottom: 0.85rem; }
+    .campaign {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1rem 0.35rem;
+      background: var(--bg);
+    }
+    .campaign-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.75rem;
+    }
+    .campaign-title { font-size: 0.8rem; color: var(--muted); font-weight: 600; }
+    .remove-campaign {
+      flex: none;
+      width: auto;
+      padding: 0.3rem 0.65rem;
+      font-size: 0.75rem;
+      background: transparent;
+      color: var(--danger);
+      border: 1px solid var(--danger);
+    }
+    #addCampaign {
+      background: transparent;
+      color: var(--accent);
+      border: 1px dashed var(--border);
+      margin-bottom: 1rem;
+      width: 100%;
+    }
+    .promoter-head, .promoter-row {
+      display: grid;
+      grid-template-columns: 1fr 110px 78px;
+      gap: 0.5rem;
+      align-items: center;
+    }
+    .promoter-head {
+      margin-bottom: 0.35rem;
+      font-size: 0.72rem;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .promoter-row { margin-bottom: 0.45rem; }
+    .promoter-row .remove-promoter,
+    .add-promoter {
+      flex: none;
+      width: auto;
+      padding: 0.45rem 0.65rem;
+      font-size: 0.75rem;
+    }
+    .promoter-row .remove-promoter {
+      background: transparent;
+      color: var(--danger);
+      border: 1px solid var(--danger);
+    }
+    .add-promoter {
+      background: transparent;
+      color: var(--accent);
+      border: 1px dashed var(--border);
+      width: 100%;
+      margin: 0.15rem 0 0.35rem;
+    }
     @media (max-width: 520px) {
       .row, .meta { grid-template-columns: 1fr; }
       .actions { flex-direction: column; }
@@ -401,24 +623,13 @@ const HTML = `<!DOCTYPE html>
 <body>
   <main>
     <h1>Form Bot</h1>
-    <p class="sub">Paste the form URL, promoter ids, set count per promoter and rate — runs all in one job.</p>
+    <p class="sub">Add one or more form links. Each promoter ID has its own completion count. All links run at the same time.</p>
 
     <form id="jobForm">
-      <div class="field">
-        <label for="formUrl">Form URL</label>
-        <input id="formUrl" name="formUrl" type="url" value="https://seeedemaseekhelp.com/Weekend_Activity_4/" placeholder="https://seeedemaseekhelp.com/Weekend_Activity_4/" required />
-        <p class="hint">The page the bot opens for each run. Change this anytime from the UI.</p>
-      </div>
-      <div class="field">
-        <label for="promoters">Promoter IDs</label>
-        <textarea id="promoters" name="promoters" placeholder="48,49,53,54,57" required></textarea>
-        <p class="hint">Comma-separated numbers (e.g. 48,49,53). Change anytime — not hardcoded. Also accepts Promoter-48.</p>
-      </div>
+      <div id="campaigns" class="campaigns"></div>
+      <button type="button" id="addCampaign">+ Add another form</button>
+      <p class="hint" style="margin-top:-0.6rem;margin-bottom:1rem;">Every form starts together. Simultaneous browsers = number of promoter IDs × max per minute, added across all forms.</p>
       <div class="row">
-        <div class="field">
-          <label for="count">Count per promoter</label>
-          <input id="count" name="count" type="number" min="1" max="10000" value="1000" required />
-        </div>
         <div class="field">
           <label for="perMinuteMin">Min per promoter / min</label>
           <input id="perMinuteMin" name="perMinuteMin" type="number" min="1" max="60" value="5" required />
@@ -452,16 +663,20 @@ const HTML = `<!DOCTYPE html>
         <div class="stat"><strong id="statFail">0</strong><span>Failed</span></div>
       </div>
       <div class="progress-wrap"><div class="progress-bar" id="progressBar"></div></div>
+      <div id="campaignStatus"></div>
       <div id="logs">Waiting…</div>
     </div>
   </main>
   <script>
     const form = document.getElementById("jobForm");
+    const campaignsEl = document.getElementById("campaigns");
+    const addCampaignBtn = document.getElementById("addCampaign");
     const startBtn = document.getElementById("startBtn");
     const stopBtn = document.getElementById("stopBtn");
     const badge = document.getElementById("badge");
     const logsEl = document.getElementById("logs");
     const progressBar = document.getElementById("progressBar");
+    const campaignStatusEl = document.getElementById("campaignStatus");
     const totalHint = document.getElementById("totalHint");
 
     function parseIds(text) {
@@ -471,32 +686,154 @@ const HTML = `<!DOCTYPE html>
         .filter(Boolean);
     }
 
+    function promoterIdDisplay(value) {
+      return String(value || "").replace(/^promoter-/i, "");
+    }
+
+    function normalizePromoterRows(promoters, fallbackCount) {
+      if (Array.isArray(promoters) && promoters.length && typeof promoters[0] === "object") {
+        return promoters.map(function (p) {
+          return {
+            id: promoterIdDisplay(p.id || p.promoter || ""),
+            count: p.count || fallbackCount || "",
+          };
+        });
+      }
+      const text = Array.isArray(promoters) ? promoters.join(",") : String(promoters || "");
+      const ids = parseIds(text).map(promoterIdDisplay);
+      if (!ids.length) return [{ id: "", count: fallbackCount || "" }];
+      return ids.map(function (id) {
+        return { id: id, count: fallbackCount || "" };
+      });
+    }
+
+    function updateCampaignTitles() {
+      campaignsEl.querySelectorAll(".campaign").forEach(function (row, index) {
+        row.querySelector(".campaign-title").textContent = "Form " + (index + 1);
+        row.querySelector(".remove-campaign").disabled =
+          campaignsEl.querySelectorAll(".campaign").length <= 1;
+      });
+    }
+
+    function collectCampaigns() {
+      return Array.from(campaignsEl.querySelectorAll(".campaign")).map(function (row) {
+        const promoters = Array.from(row.querySelectorAll(".promoter-row")).map(function (item) {
+          return {
+            id: item.querySelector(".c-pid").value.trim(),
+            count: Number(item.querySelector(".c-pcount").value),
+          };
+        }).filter(function (item) { return item.id; });
+        return {
+          formUrl: row.querySelector(".c-url").value.trim(),
+          promoters: promoters,
+        };
+      });
+    }
+
+    function addPromoterRow(listEl, id, count) {
+      const row = document.createElement("div");
+      row.className = "promoter-row";
+      row.innerHTML =
+        '<input class="c-pid" placeholder="ID, e.g. 21" required />' +
+        '<input class="c-pcount" type="number" min="1" max="10000" placeholder="Count" required />' +
+        '<button type="button" class="remove-promoter">Remove</button>';
+      row.querySelector(".c-pid").value = id || "";
+      row.querySelector(".c-pcount").value = count || "";
+      row.querySelector(".remove-promoter").addEventListener("click", function () {
+        const rows = listEl.querySelectorAll(".promoter-row");
+        if (rows.length <= 1) return;
+        row.remove();
+        updateTotalHint();
+      });
+      row.querySelector(".c-pid").addEventListener("input", updateTotalHint);
+      row.querySelector(".c-pcount").addEventListener("input", updateTotalHint);
+      listEl.appendChild(row);
+      updateTotalHint();
+    }
+
+    function addCampaignRow(url, promoters, fallbackCount) {
+      const wrap = document.createElement("div");
+      wrap.className = "campaign";
+      wrap.innerHTML =
+        '<div class="campaign-head">' +
+          '<span class="campaign-title">Form</span>' +
+          '<button type="button" class="remove-campaign">Remove</button>' +
+        "</div>" +
+        '<div class="field">' +
+          '<label>Form URL</label>' +
+          '<input class="c-url" type="url" placeholder="https://seeedemaseekhelp.com/Weekend_Activity_6/" required />' +
+        "</div>" +
+        '<div class="field">' +
+          '<label>Promoters for this form</label>' +
+          '<div class="promoter-head"><span>Promoter ID</span><span>Completions</span><span></span></div>' +
+          '<div class="promoter-list"></div>' +
+          '<button type="button" class="add-promoter">+ Add promoter</button>' +
+          '<p class="hint">Each ID has its own count. Example: 21 → 10, 22 → 25, 23 → 21.</p>' +
+        "</div>";
+      wrap.querySelector(".c-url").value = url || "";
+      const listEl = wrap.querySelector(".promoter-list");
+      normalizePromoterRows(promoters, fallbackCount).forEach(function (item) {
+        addPromoterRow(listEl, item.id, item.count);
+      });
+      wrap.querySelector(".add-promoter").addEventListener("click", function () {
+        addPromoterRow(listEl, "", "");
+      });
+      wrap.querySelector(".remove-campaign").addEventListener("click", function () {
+        if (campaignsEl.querySelectorAll(".campaign").length <= 1) return;
+        wrap.remove();
+        updateCampaignTitles();
+        updateTotalHint();
+      });
+      wrap.querySelector(".c-url").addEventListener("input", updateTotalHint);
+      campaignsEl.appendChild(wrap);
+      updateCampaignTitles();
+      updateTotalHint();
+    }
+
     function updateTotalHint() {
-      const n = parseIds(form.promoters.value).length;
-      const c = Number(form.count.value) || 0;
-      const minR = Number(form.perMinuteMin.value) || 5;
+      const campaigns = collectCampaigns();
       const maxR = Number(form.perMinuteMax.value) || 14;
-      const avg = ((minR + maxR) / 2) * n || 1;
-      const total = n * c;
-      const mins = total ? Math.ceil(total / avg) : 0;
-      const hours = (mins / 60).toFixed(1);
-      totalHint.textContent = n
-        ? "Total: " + total + " forms · random " + minR + "–" + maxR + " per promoter/min (" + (minR * n) + "–" + (maxR * n) + " total) · ~" + hours + " hours"
-        : "Paste promoter ids above";
+      let total = 0;
+      let peak = 0;
+      campaigns.forEach(function (campaign) {
+        campaign.promoters.forEach(function (item) {
+          total += Number(item.count) || 0;
+        });
+        peak += campaign.promoters.length * maxR;
+      });
+      const formCount = campaigns.length;
+      totalHint.textContent = total
+        ? formCount + " form(s) in parallel · " + total + " submissions · ~" + peak + " simultaneous browsers (no cap)"
+        : "Add a form URL, then each promoter ID and how many completions it needs";
     }
 
     async function loadDefaults() {
-      const res = await fetch("/api/defaults");
-      const d = await res.json();
-      if (d.formUrl) form.formUrl.value = d.formUrl;
-      if (d.promoters) form.promoters.value = Array.isArray(d.promoters) ? d.promoters.join(",") : d.promoters;
-      else if (d.promoter) form.promoters.value = d.promoter;
-      if (d.count) form.count.value = d.count;
-      if (d.perMinuteMin) form.perMinuteMin.value = d.perMinuteMin;
+      const [defaultsRes, statusRes] = await Promise.all([
+        fetch("/api/defaults"),
+        fetch("/api/status"),
+      ]);
+      const d = await defaultsRes.json();
+      const status = await statusRes.json();
+      campaignsEl.innerHTML = "";
+      const fromJob = status.config && status.config.campaigns && status.config.campaigns.length
+        ? status.config.campaigns
+        : null;
+      const rows = fromJob || (Array.isArray(d.campaigns) && d.campaigns.length
+        ? d.campaigns
+        : [{ formUrl: d.formUrl || "", promoters: d.promoters || d.promoter || "" }]);
+      const fallbackCount = (status.config && status.config.count) || d.count || "";
+      rows.forEach(function (row) {
+        addCampaignRow(row.formUrl, row.promoters, fallbackCount);
+      });
+      const cfg = status.config || d;
+      if (cfg.perMinuteMin) form.perMinuteMin.value = cfg.perMinuteMin;
+      else if (d.perMinuteMin) form.perMinuteMin.value = d.perMinuteMin;
       else if (d.perMinute) form.perMinuteMin.value = d.perMinute;
-      if (d.perMinuteMax) form.perMinuteMax.value = d.perMinuteMax;
+      if (cfg.perMinuteMax) form.perMinuteMax.value = cfg.perMinuteMax;
+      else if (d.perMinuteMax) form.perMinuteMax.value = d.perMinuteMax;
       else if (d.perMinute) form.perMinuteMax.value = d.perMinute;
-      if (d.language) form.language.value = d.language;
+      if (cfg.language) form.language.value = cfg.language;
+      else if (d.language) form.language.value = d.language;
       updateTotalHint();
     }
 
@@ -505,16 +842,21 @@ const HTML = `<!DOCTYPE html>
       badge.textContent = state === "running" ? "Running" : state === "error" ? "Error" : state === "done" ? "Done" : "Idle";
     }
 
+    function setFormDisabled(running) {
+      form.perMinuteMin.disabled = running;
+      form.perMinuteMax.disabled = running;
+      form.language.disabled = running;
+      addCampaignBtn.disabled = running;
+      campaignsEl.querySelectorAll(".c-url, .c-pid, .c-pcount, .remove-campaign, .remove-promoter, .add-promoter").forEach(function (el) {
+        el.disabled = running;
+      });
+    }
+
     function render(status) {
       const running = status.running;
       startBtn.disabled = running;
       stopBtn.disabled = !running;
-      form.formUrl.disabled = running;
-      form.promoters.disabled = running;
-      form.count.disabled = running;
-      form.perMinuteMin.disabled = running;
-      form.perMinuteMax.disabled = running;
-      form.language.disabled = running;
+      setFormDisabled(running);
 
       if (running) setBadge("running");
       else if (status.error) setBadge("error");
@@ -528,6 +870,17 @@ const HTML = `<!DOCTYPE html>
 
       const pct = status.total ? Math.round((status.current / status.total) * 100) : 0;
       progressBar.style.width = pct + "%";
+
+      const campaigns = status.campaignProgress || [];
+      campaignStatusEl.innerHTML = campaigns.map(function (c) {
+        const state = c.status || "queued";
+        const label = state === "running" ? "running" : state === "done" ? "done" : state === "error" ? "error" : state === "stopped" ? "stopped" : "waiting";
+        return '<div class="c-stat ' + state + '">' +
+          '<span class="c-name">Form ' + (c.index + 1) + ': ' + (c.name || c.formUrl) + '</span>' +
+          '<span class="c-meta">' + (c.current || 0) + '/' + (c.total || 0) + (c.promoterSummary ? ' · ' + c.promoterSummary : '') + '</span>' +
+          '<span class="c-state">' + label + '</span>' +
+        '</div>';
+      }).join("");
 
       logsEl.textContent = (status.logs && status.logs.length)
         ? status.logs.join("\\n")
@@ -544,8 +897,9 @@ const HTML = `<!DOCTYPE html>
       }
     }
 
-    form.promoters.addEventListener("input", updateTotalHint);
-    form.count.addEventListener("input", updateTotalHint);
+    addCampaignBtn.addEventListener("click", function () {
+      addCampaignRow("", "");
+    });
     form.perMinuteMin.addEventListener("input", updateTotalHint);
     form.perMinuteMax.addEventListener("input", updateTotalHint);
 
@@ -553,9 +907,7 @@ const HTML = `<!DOCTYPE html>
       e.preventDefault();
       startBtn.disabled = true;
       const payload = {
-        formUrl: form.formUrl.value.trim(),
-        promoters: form.promoters.value.trim(),
-        count: Number(form.count.value),
+        campaigns: collectCampaigns(),
         perMinuteMin: Number(form.perMinuteMin.value),
         perMinuteMax: Number(form.perMinuteMax.value),
         language: form.language.value,

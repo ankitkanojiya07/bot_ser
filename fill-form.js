@@ -10,7 +10,7 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_FORM_URL =
-  "https://seeedemaseekhelp.com/Weekend_Activity_4/";
+  "https://seeedemaseekhelp.com/Weekend_Activity_5/";
 const DATA_FILE = join(__dirname, "form-data.json");
 
 const LANGUAGES = {
@@ -125,6 +125,104 @@ function randomInt(min, max) {
 }
 
 const MAX_RETRIES = 3;
+/** Keep each Chromium process small so a GPU/renderer crash cannot wipe a whole batch. */
+const PAGES_PER_BROWSER = 6;
+const CHROMIUM_ARGS = [
+  "--disable-gpu",
+  "--disable-gpu-compositing",
+  "--disable-software-rasterizer",
+  "--disable-dev-shm-usage",
+  "--mute-audio",
+];
+
+function shortError(error) {
+  const raw = String(error?.message || error);
+  if (
+    /page crashed|has been closed|target closed|browser has been closed/i.test(
+      raw,
+    )
+  ) {
+    return "Chromium crashed (will relaunch)";
+  }
+  const withoutDump = raw.split("Browser logs:")[0].split("Call log:")[0].trim();
+  return (withoutDump.split("\n")[0].trim() || withoutDump).slice(0, 240);
+}
+
+function isBrowserDeadError(error) {
+  return /page crashed|has been closed|target closed|browser has been closed/i.test(
+    String(error?.message || error),
+  );
+}
+
+async function launchChromium(headless) {
+  return chromium.launch({
+    headless,
+    args: CHROMIUM_ARGS,
+    ignoreDefaultArgs: ["--enable-unsafe-swiftshader"],
+  });
+}
+
+function createBrowserPool({ headless, size, onLog }) {
+  const slots = Array.from({ length: Math.max(1, size) }, (_, slotIndex) => {
+    let browser = null;
+    let launching = null;
+
+    const ensure = async () => {
+      if (browser?.isConnected()) return browser;
+      if (launching) return launching;
+      launching = launchChromium(headless)
+        .then((instance) => {
+          browser = instance;
+          instance.on("disconnected", () => {
+            if (browser === instance) browser = null;
+          });
+          return instance;
+        })
+        .catch((error) => {
+          browser = null;
+          throw error;
+        })
+        .finally(() => {
+          launching = null;
+        });
+      return launching;
+    };
+
+    const close = async () => {
+      const instance = browser;
+      browser = null;
+      await instance?.close().catch(() => {});
+    };
+
+    return { slotIndex, ensure, close };
+  });
+
+  return {
+    size: slots.length,
+    async withPage(jobIndex, fn) {
+      const slot = slots[jobIndex % slots.length];
+      const browser = await slot.ensure();
+      let page;
+      try {
+        page = await browser.newPage();
+        return await fn(page);
+      } catch (error) {
+        if (isBrowserDeadError(error)) {
+          onLog?.(
+            `Chromium ${slot.slotIndex + 1}/${slots.length} died — relaunching for retries`,
+          );
+          await slot.close();
+        }
+        throw error;
+      } finally {
+        await page?.close().catch(() => {});
+      }
+    },
+    async close() {
+      await Promise.all(slots.map((slot) => slot.close()));
+    },
+  };
+}
 
 function shuffleInPlace(items) {
   for (let i = items.length - 1; i > 0; i--) {
@@ -170,16 +268,83 @@ export function parsePromoters(input) {
   return promoters;
 }
 
+function normalizePromoterId(raw) {
+  const ids = parsePromoters(raw);
+  return ids[0] || "";
+}
+
+/**
+ * Per-promoter completion targets.
+ * Accepts:
+ *   [{ id: "21", count: 10 }, { promoter: "Promoter-22", count: 25 }]
+ *   ["21", "22"] + fallbackCount
+ *   "21,22,23" + fallbackCount
+ *   "21:10, 22:25" or newline pairs
+ */
+export function parsePromoterTargets(input, fallbackCount) {
+  const targets = [];
+  const seen = new Set();
+
+  const push = (rawId, rawCount) => {
+    const promoter = normalizePromoterId(rawId);
+    if (!promoter) return;
+    const count = Number(rawCount);
+    if (!Number.isFinite(count) || count < 1 || count > 10000) {
+      throw new Error(`Count for ${promoter} must be between 1 and 10000`);
+    }
+    if (seen.has(promoter)) return;
+    seen.add(promoter);
+    targets.push({ promoter, count: Math.floor(count) });
+  };
+
+  if (Array.isArray(input)) {
+    for (const entry of input) {
+      if (entry && typeof entry === "object") {
+        push(entry.id ?? entry.promoter ?? "", entry.count ?? fallbackCount);
+      } else {
+        push(entry, fallbackCount);
+      }
+    }
+    return targets;
+  }
+
+  const raw = String(input ?? "").trim();
+  if (!raw) return targets;
+
+  const parts = raw
+    .split(/[\n,;]+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const hasExplicitCounts = parts.some((part) => part.includes(":"));
+  if (hasExplicitCounts) {
+    for (const part of parts) {
+      const colon = part.lastIndexOf(":");
+      const idPart = colon === -1 ? part : part.slice(0, colon).trim();
+      const countPart = colon === -1 ? fallbackCount : part.slice(colon + 1).trim();
+      push(idPart, countPart);
+    }
+    return targets;
+  }
+
+  for (const promoter of parsePromoters(raw)) {
+    push(promoter, fallbackCount);
+  }
+  return targets;
+}
+
 function resolvePromoters(config) {
-  const fromList = parsePromoters(config.promoters ?? config.promoter ?? "");
-  if (fromList.length === 0) {
+  const fallbackCount = getRunCount(config);
+  const targets = parsePromoterTargets(
+    config.promoters ?? config.promoter ?? "",
+    fallbackCount,
+  );
+  if (targets.length === 0) {
     throw new Error(
       "At least one promoter is required (e.g. 48,49,53 or Promoter-3)",
     );
   }
-  const shuffledPromoters = shuffleInPlace([...fromList]);
-  const countPer = getRunCount(config);
-  return { promoters: shuffledPromoters, countPer };
+  shuffleInPlace(targets);
+  return { targets };
 }
 
 /** Keep the next simultaneous batch at least one minute after the prior one started. */
@@ -215,6 +380,54 @@ function resolveRadioValue(formConfig, fieldName, answerKey, answer) {
   return `${prefix}-${YES_NO[answer]}`;
 }
 
+function radioPredicate(fieldName, answer) {
+  if (fieldName === "qst_0") {
+    const wantUnder = String(answer).includes("<");
+    return (label) =>
+      wantUnder ? /<\s*50/.test(label) : />\s*50/.test(label);
+  }
+  if (fieldName === "qst_1") {
+    if (answer === "Male") return (label) => /male|पुरु/i.test(label);
+    if (answer === "Female") return (label) => /female|महिला/i.test(label);
+    return (label) => /other|अन्य/i.test(label);
+  }
+  if (answer === "Yes") return (label) => /yes|हां|हाँ/i.test(label);
+  return (label) => /no|नहीं|नही/i.test(label);
+}
+
+async function optionLabel(radio) {
+  return radio.evaluate((el) => {
+    const next = el.nextElementSibling;
+    if (next && next.tagName === "LABEL") return (next.textContent || "").trim();
+    if (el.id) {
+      const lab = document.querySelector(`label[for="${el.id}"]`);
+      if (lab) return (lab.textContent || "").trim();
+    }
+    return "";
+  });
+}
+
+async function checkMatchingRadio(page, name, answer, fallbackValue) {
+  const radios = page.locator(`input[name="${name}"]`);
+  await radios.first().waitFor({ timeout: 15000 });
+  const count = await radios.count();
+  const predicate = radioPredicate(name, answer);
+  const seen = [];
+
+  for (let i = 0; i < count; i += 1) {
+    const radio = radios.nth(i);
+    const value = (await radio.getAttribute("value")) || "";
+    const label = await optionLabel(radio);
+    seen.push(`${label || "(no label)"}=${value}`);
+    if (predicate(label) || (fallbackValue && value === fallbackValue)) {
+      await radio.check({ force: true });
+      return;
+    }
+  }
+
+  throw new Error(`No matching option for ${name}="${answer}" among: ${seen.join("; ")}`);
+}
+
 async function fillStep1(page, data) {
   const languageValue = getLanguageId(data);
   await page.selectOption('select[name="language"]', languageValue);
@@ -229,20 +442,17 @@ async function fillStep2(page, data) {
 
   await page.fill('input[name="name"]', data.fullName);
   await page.selectOption('select[name="promoter"]', data.promoter);
+  await page.locator('input[name="qst_0"]').first().waitFor({ timeout: 15000 });
 
   for (const [fieldName, answerKey] of RADIO_FIELDS) {
-    const value = resolveRadioValue(
+    const answer = answers[answerKey];
+    const fallbackValue = resolveRadioValue(
       formConfig,
       fieldName,
       answerKey,
-      answers[answerKey],
+      answer,
     );
-    if (!value) {
-      throw new Error(`Unknown answer for ${answerKey}: ${answers[answerKey]}`);
-    }
-    await page
-      .locator(`input[name="${fieldName}"][value="${value}"]`)
-      .check({ force: true });
+    await checkMatchingRadio(page, fieldName, answer, fallbackValue);
   }
 
   for (const condition of answers.clinicalConditions ?? []) {
@@ -272,19 +482,31 @@ function resolveFormUrl(data) {
   return url;
 }
 
+function formShortName(url) {
+  try {
+    const parsed = new URL(url);
+    const last = parsed.pathname.replace(/\/+$/, "").split("/").filter(Boolean).pop();
+    return last || parsed.host;
+  } catch {
+    return url;
+  }
+}
+
 async function fillForm(page, data, { isFirstRun }) {
   if (isFirstRun) {
-    await page.goto(resolveFormUrl(data), { waitUntil: "networkidle" });
+    await page.goto(resolveFormUrl(data), {
+      waitUntil: "domcontentloaded",
+      timeout: 30_000,
+    });
   }
 
   await fillStep1(page, data);
   await fillStep2(page, data);
-  await page.waitForLoadState("networkidle");
 }
 
 /**
  * Run a batch of form submissions.
- * @param {object} config - { formUrl?, language, promoter|promoters, count (per promoter), perMinuteMin, perMinuteMax, random? }
+ * @param {object} config - { formUrl?, language, promoter|promoters (ids or [{id,count}]), count (fallback), perMinuteMin, perMinuteMax, random? }
  * @param {object} options - { headless?, onLog?, onProgress?, shouldStop? }
  */
 export async function runBatch(config, options = {}) {
@@ -295,11 +517,12 @@ export async function runBatch(config, options = {}) {
     shouldStop = () => false,
   } = options;
 
-  const { promoters, countPer } = resolvePromoters(config);
-  const runCount = promoters.length * countPer;
+  const { targets } = resolvePromoters(config);
+  const promoters = targets.map((target) => target.promoter);
+  const runCount = targets.reduce((sum, target) => sum + target.count, 0);
   const { min: minPerMin, max: maxPerMin } = getPerMinuteRange(config);
   const avgPerPromoterRate = (minPerMin + maxPerMin) / 2;
-  const avgTotalRate = avgPerPromoterRate * promoters.length;
+  const avgTotalRate = avgPerPromoterRate * targets.length;
   const estimatedMinutes = Math.ceil(runCount / avgTotalRate);
 
   const log = (msg) => {
@@ -308,12 +531,20 @@ export async function runBatch(config, options = {}) {
   };
 
   log(
-    `Starting ${runCount} form submission(s) | ${promoters.length} promoter(s) × ${countPer} | random ${minPerMin}–${maxPerMin} per promoter/min (${minPerMin * promoters.length}–${maxPerMin * promoters.length} total, ~${estimatedMinutes} min)...`,
+    `Starting ${runCount} form submission(s) | ${targets
+      .map((target) => `${target.promoter}×${target.count}`)
+      .join(", ")} | random ${minPerMin}–${maxPerMin} per promoter/min (${minPerMin * targets.length}–${maxPerMin * targets.length} total, ~${estimatedMinutes} min)...`,
   );
   log(`Form URL: ${resolveFormUrl(config)}`);
   log(`Promoter order (shuffled): ${promoters.join(", ")}`);
 
-  const browser = await chromium.launch({ headless });
+  const peakConcurrent = targets.length * maxPerMin;
+  const poolSize = Math.max(1, Math.ceil(peakConcurrent / PAGES_PER_BROWSER));
+  log(
+    `Chromium pool: ${poolSize} browser(s) × up to ${PAGES_PER_BROWSER} pages (peak ${peakConcurrent} simultaneous)`,
+  );
+
+  const pool = createBrowserPool({ headless, size: poolSize, onLog: log });
   const results = [];
   const doneByPromoter = Object.fromEntries(promoters.map((p) => [p, 0]));
   let completed = 0;
@@ -329,47 +560,55 @@ export async function runBatch(config, options = {}) {
       batchNumber += 1;
       const perPromoterBatchSize = randomInt(minPerMin, maxPerMin);
       const batch = [];
-      for (const promoter of promoters) {
-        const remaining = countPer - doneByPromoter[promoter];
+      for (const target of targets) {
+        const remaining = target.count - doneByPromoter[target.promoter];
         for (let n = 1; n <= Math.min(perPromoterBatchSize, remaining); n++) {
           batch.push({
-            promoter,
-            indexInPromoter: doneByPromoter[promoter] + n,
-            countPer,
+            promoter: target.promoter,
+            indexInPromoter: doneByPromoter[target.promoter] + n,
+            countPer: target.count,
           });
         }
       }
+      if (batch.length === 0) break;
       const batchStartedAt = Date.now();
       log(
         `\n--- Batch ${batchNumber}: ${perPromoterBatchSize} per promoter, launching ${batch.length} form(s) simultaneously ---`,
       );
 
       await Promise.all(
-        batch.map(async (slot, index) => {
+        batch.map(async (item, index) => {
           const run = offset + index + 1;
-          doneByPromoter[slot.promoter] =
-            (doneByPromoter[slot.promoter] || 0) + 1;
-          const data = buildRunData({ ...config, promoter: slot.promoter });
+          doneByPromoter[item.promoter] =
+            (doneByPromoter[item.promoter] || 0) + 1;
+          const data = buildRunData({ ...config, promoter: item.promoter });
 
+          const formName = formShortName(resolveFormUrl(config));
           log(
-            `Run ${run}/${runCount} | ${slot.promoter} (${doneByPromoter[slot.promoter]}/${slot.countPer}) | ${data.answers?.gender ?? "configured data"}`,
+            `Run ${formName} ${run}/${runCount} | ${item.promoter} (${doneByPromoter[item.promoter]}/${item.countPer}) | ${data.answers?.gender ?? "configured data"}`,
           );
+
+          if (index > 0) {
+            await new Promise((resolve) => setTimeout(resolve, index * 15));
+          }
+
           let lastError;
           for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt += 1) {
-            let page;
             try {
-              page = await browser.newPage();
-              await fillForm(page, data, { isFirstRun: true });
-              const result = {
-                run,
-                name: data.fullName,
-                promoter: slot.promoter,
-                status: "success",
-                url: page.url(),
-              };
+              const result = await pool.withPage(index, async (page) => {
+                await fillForm(page, data, { isFirstRun: true });
+                return {
+                  run,
+                  name: data.fullName,
+                  promoter: item.promoter,
+                  formUrl: resolveFormUrl(config),
+                  status: "success",
+                  url: page.url(),
+                };
+              });
               results.push(result);
               log(
-                `Run ${run} done${attempt > 1 ? ` on retry ${attempt - 1}` : ""}: ${page.url()}`,
+                `Run ${run} done${attempt > 1 ? ` on retry ${attempt - 1}` : ""}: ${result.url}`,
               );
               lastError = null;
               break;
@@ -377,12 +616,12 @@ export async function runBatch(config, options = {}) {
               if (error.message === "Stopped by user") throw error;
               lastError = error;
               if (attempt <= MAX_RETRIES) {
-                onLog(
-                  `Run ${run} failed (attempt ${attempt}); retrying (${MAX_RETRIES - attempt} retries left): ${error.message}`,
+                const waitMs = isBrowserDeadError(error) ? 400 * attempt : 200;
+                log(
+                  `Run ${run} failed (attempt ${attempt}); retrying (${MAX_RETRIES - attempt} retries left): ${shortError(error)}`,
                 );
+                await new Promise((resolve) => setTimeout(resolve, waitMs));
               }
-            } finally {
-              await page?.close().catch(() => {});
             }
           }
 
@@ -390,33 +629,22 @@ export async function runBatch(config, options = {}) {
             const result = {
               run,
               name: data.fullName,
-              promoter: slot.promoter,
+              promoter: item.promoter,
+              formUrl: resolveFormUrl(config),
               status: "failed",
-              error: lastError.message,
+              error: shortError(lastError),
             };
             results.push(result);
             console.error(
-              `Run ${run} failed after ${MAX_RETRIES} retries: ${lastError.message}`,
+              `Run ${run} failed after ${MAX_RETRIES} retries: ${result.error}`,
             );
-            onLog(
-              `Run ${run} failed after ${MAX_RETRIES} retries: ${lastError.message}`,
+            log(
+              `Run ${run} failed after ${MAX_RETRIES} retries: ${result.error}`,
             );
           }
 
           completed += 1;
           onProgress({ current: completed, total: runCount, results });
-          if (lastError) {
-            try {
-              const errorPage = await browser.newPage();
-              await errorPage.screenshot({
-                path: join(__dirname, `error-run-${run}.png`),
-                fullPage: true,
-              });
-              await errorPage.close();
-            } catch {
-              /* ignore screenshot errors */
-            }
-          }
         }),
       );
 
@@ -430,22 +658,24 @@ export async function runBatch(config, options = {}) {
       log("\nBrowser will close in 5 seconds...");
       await new Promise((resolve) => setTimeout(resolve, 5000));
     }
-    await browser.close();
+    await pool.close();
   }
 
   const succeeded = results.filter((r) => r.status === "success").length;
   const failed = results.filter((r) => r.status === "failed").length;
 
-  log("\n=== Summary ===");
+  log(`\n=== Form summary (${formShortName(resolveFormUrl(config))}) ===`);
   log(`Total: ${results.length} | Success: ${succeeded} | Failed: ${failed}`);
-  for (const promoter of promoters) {
+  for (const target of targets) {
     const ok = results.filter(
-      (r) => r.promoter === promoter && r.status === "success",
+      (r) => r.promoter === target.promoter && r.status === "success",
     ).length;
     const bad = results.filter(
-      (r) => r.promoter === promoter && r.status === "failed",
+      (r) => r.promoter === target.promoter && r.status === "failed",
     ).length;
-    log(`  ${promoter}: success ${ok} | failed ${bad}`);
+    log(
+      `  ${target.promoter}: success ${ok} | failed ${bad} | target ${target.count}`,
+    );
   }
 
   return {
@@ -454,7 +684,7 @@ export async function runBatch(config, options = {}) {
     failed,
     total: results.length,
     promoters,
-    countPer,
+    targets,
   };
 }
 

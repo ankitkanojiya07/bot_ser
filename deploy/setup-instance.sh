@@ -43,6 +43,7 @@ echo "==> Starting form-bot on port $PORT..."
 sudo docker run -d \
   --name form-bot \
   --restart unless-stopped \
+  --shm-size=2g \
   -p "${PORT}:3000" \
   -e HEADLESS=true \
   -e PORT=3000 \

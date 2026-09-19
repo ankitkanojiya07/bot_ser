@@ -1,8 +1,22 @@
 {
-  "formUrl": "https://seeedemaseekhelp.com/Weekend_Activity_4/",
   "language": "हिंदी",
-  "promoters": "48,49,53,54",
-  "random": true,
-  "count": 1000,
-  "perMinute": 4
+  "perMinuteMin": 2,
+  "perMinuteMax": 4,
+  "campaigns": [
+    {
+      "formUrl": "https://seeedemaseekhelp.com/Weekend_Activity_5/",
+      "promoters": [
+        { "id": "21", "count": 10 },
+        { "id": "22", "count": 25 },
+        { "id": "23", "count": 21 }
+      ]
+    },
+    {
+      "formUrl": "https://seeedemaseekhelp.com/Weekend_Activity_6/",
+      "promoters": [
+        { "id": "5", "count": 15 },
+        { "id": "15", "count": 20 }
+      ]
+    }
+  ]
 }
