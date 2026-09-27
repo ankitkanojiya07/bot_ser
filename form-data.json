@@ -1,9 +1,9 @@
 {
   "formUrl": "https://seeedemaseekhelp.com/Weekend_Activity_5/",
   "language": "हिंदी",
-  "promoters": "21,22,23,24,5,15,10,20",
+  "promoters": "11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30",
   "random": true,
-  "count": 210,
-  "perMinuteMin": 2,
-  "perMinuteMax": 4
+  "count": 500,
+  "perMinuteMin": 3,
+  "perMinuteMax": 5
 }

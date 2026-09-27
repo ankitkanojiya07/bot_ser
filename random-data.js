@@ -113,9 +113,24 @@ function pickSome(items) {
   return shuffled.slice(0, count);
 }
 
-/** Independent fair draw per form. No batch-level gender sequence is imposed. */
 export function pickWeightedGender() {
   return Math.random() < 0.5 ? "Male" : "Female";
+}
+
+/** Exact 50/50 Male/Female for `count` forms (odd leftover is random). Shuffled so batches mix. */
+export function balancedGenders(count) {
+  const n = Math.max(0, Math.floor(Number(count) || 0));
+  const extraMale = n % 2 === 1 && Math.random() < 0.5;
+  const males = Math.floor(n / 2) + (extraMale ? 1 : 0);
+  const list = [
+    ...Array(males).fill("Male"),
+    ...Array(n - males).fill("Female"),
+  ];
+  for (let i = list.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [list[i], list[j]] = [list[j], list[i]];
+  }
+  return list;
 }
 
 export function generateRandomIndianName(gender = pickWeightedGender()) {

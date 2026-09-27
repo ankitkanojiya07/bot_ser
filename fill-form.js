@@ -6,6 +6,7 @@ import {
   generateRandomIndianName,
   generateRandomAnswers,
   pickWeightedGender,
+  balancedGenders,
 } from "./random-data.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -102,13 +103,13 @@ function loadConfig() {
   return JSON.parse(readFileSync(DATA_FILE, "utf8"));
 }
 
-function buildRunData(config) {
+function buildRunData(config, gender) {
   if (config.random !== false) {
-    const gender = pickWeightedGender();
+    const chosen = gender || pickWeightedGender();
     return {
       ...config,
-      fullName: generateRandomIndianName(gender),
-      answers: generateRandomAnswers(gender),
+      fullName: generateRandomIndianName(chosen),
+      answers: generateRandomAnswers(chosen),
     };
   }
   return config;
@@ -387,7 +388,11 @@ function radioPredicate(fieldName, answer) {
       wantUnder ? /<\s*50/.test(label) : />\s*50/.test(label);
   }
   if (fieldName === "qst_1") {
-    if (answer === "Male") return (label) => /male|पुरु/i.test(label);
+    if (answer === "Male") {
+      return (label) =>
+        /पुरु/.test(label) ||
+        (/\bmale\b/i.test(label) && !/female/i.test(label));
+    }
     if (answer === "Female") return (label) => /female|महिला/i.test(label);
     return (label) => /other|अन्य/i.test(label);
   }
@@ -544,6 +549,17 @@ export async function runBatch(config, options = {}) {
     `Chromium pool: ${poolSize} browser(s) × up to ${PAGES_PER_BROWSER} pages (peak ${peakConcurrent} simultaneous)`,
   );
 
+  const genderByPromoter = Object.fromEntries(
+    targets.map((target) => [target.promoter, balancedGenders(target.count)]),
+  );
+  const maleTotal = Object.values(genderByPromoter).reduce(
+    (sum, list) => sum + list.filter((g) => g === "Male").length,
+    0,
+  );
+  log(
+    `Gender split: ${maleTotal} Male / ${runCount - maleTotal} Female (50/50 per promoter)`,
+  );
+
   const pool = createBrowserPool({ headless, size: poolSize, onLog: log });
   const results = [];
   const doneByPromoter = Object.fromEntries(promoters.map((p) => [p, 0]));
@@ -567,6 +583,10 @@ export async function runBatch(config, options = {}) {
             promoter: target.promoter,
             indexInPromoter: doneByPromoter[target.promoter] + n,
             countPer: target.count,
+            gender:
+              genderByPromoter[target.promoter][
+                doneByPromoter[target.promoter] + n - 1
+              ],
           });
         }
       }
@@ -581,7 +601,10 @@ export async function runBatch(config, options = {}) {
           const run = offset + index + 1;
           doneByPromoter[item.promoter] =
             (doneByPromoter[item.promoter] || 0) + 1;
-          const data = buildRunData({ ...config, promoter: item.promoter });
+          const data = buildRunData(
+            { ...config, promoter: item.promoter },
+            item.gender,
+          );
 
           const formName = formShortName(resolveFormUrl(config));
           log(
