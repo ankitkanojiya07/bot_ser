@@ -424,7 +424,8 @@ async function checkMatchingRadio(page, name, answer, fallbackValue) {
     const value = (await radio.getAttribute("value")) || "";
     const label = await optionLabel(radio);
     seen.push(`${label || "(no label)"}=${value}`);
-    if (predicate(label) || (fallbackValue && value === fallbackValue)) {
+    // Prefer exact option value (avoids Male/Female label substring issues)
+    if ((fallbackValue && value === fallbackValue) || predicate(label)) {
       await radio.check({ force: true });
       return;
     }

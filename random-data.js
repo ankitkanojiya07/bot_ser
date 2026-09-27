@@ -78,6 +78,17 @@ const FEMALE_FIRST_NAMES = [
   "Ananya", "Aadhya", "Diya", "Myra", "Saanvi", "Anika", "Navya", "Ira",
   "Kiara", "Pari", "Riya", "Meera", "Kavya", "Ishita", "Priya", "Neha",
   "Pooja", "Sunita", "Anjali", "Kavita", "Sneha", "Nisha", "Rekha", "Geeta",
+  "Aarohi", "Aditi", "Aisha", "Akshara", "Alisha", "Amrita", "Anushka", "Aparna",
+  "Archana", "Arushi", "Avni", "Bhavna", "Charvi", "Deepa", "Deepika", "Divya",
+  "Esha", "Fatima", "Gauri", "Gayatri", "Harini", "Isha", "Janhvi", "Jaya",
+  "Jyoti", "Kajal", "Kalpana", "Kamala", "Karishma", "Khushi", "Kirti", "Komal",
+  "Lakshmi", "Lavanya", "Madhuri", "Mahima", "Mansi", "Maya", "Megha", "Mira",
+  "Mohini", "Monica", "Nandini", "Naina", "Nikita", "Nidhi", "Pallavi", "Payal",
+  "Pragya", "Prachi", "Preeti", "Radha", "Rani", "Rashmi", "Raveena", "Richa",
+  "Ritika", "Sakshi", "Saloni", "Samaira", "Sandhya", "Sanjana", "Sarika", "Seema",
+  "Shalini", "Shanti", "Shilpa", "Shreya", "Shruti", "Simran", "Sita", "Sonal",
+  "Sonam", "Suhana", "Swati", "Tanya", "Tanvi", "Trisha", "Uma", "Urvashi",
+  "Vaishnavi", "Vandana", "Varsha", "Vidya", "Vimala", "Yamini", "Zara", "Zoya",
 ];
 
 const LAST_NAMES = [
@@ -113,6 +124,7 @@ function pickSome(items) {
   return shuffled.slice(0, count);
 }
 
+/** Independent fair draw when no balanced list is supplied. */
 export function pickWeightedGender() {
   return Math.random() < 0.5 ? "Male" : "Female";
 }
