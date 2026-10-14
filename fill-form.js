@@ -233,7 +233,7 @@ function shuffleInPlace(items) {
   return items;
 }
 
-/** Random forms started per promoter in each simultaneous minute-long batch. */
+/** Random target forms per promoter per minute (spaced evenly across the minute). */
 function getPerMinuteRange(config) {
   const envMin = Number(process.env.PER_MINUTE_MIN);
   const envMax = Number(process.env.PER_MINUTE_MAX);
@@ -348,16 +348,33 @@ function resolvePromoters(config) {
   return { targets };
 }
 
-/** Keep the next simultaneous batch at least one minute after the prior one started. */
-async function waitForNextBatch(batchStartedAt, { shouldStop, onLog } = {}) {
-  const waitMs = 60_000 - (Date.now() - batchStartedAt);
+/** Sleep in short chunks so Stop can interrupt waits. */
+async function sleepMs(ms, { shouldStop } = {}) {
+  if (ms <= 0) return;
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (shouldStop?.()) throw new Error("Stopped by user");
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(250, end - Date.now())),
+    );
+  }
+}
+
+/** Space fills evenly: if rate is 5/min, wait ~12s between starts. */
+async function waitForPaceInterval(
+  slotStartedAt,
+  intervalMs,
+  { shouldStop, onLog, label } = {},
+) {
+  const waitMs = intervalMs - (Date.now() - slotStartedAt);
   if (waitMs <= 0) return;
   if (shouldStop?.()) throw new Error("Stopped by user");
 
-  const msg = `Batch complete — waiting ${Math.ceil(waitMs / 1000)}s before the next simultaneous batch...`;
+  const who = label ? `${label}: ` : "";
+  const msg = `${who}pacing — next fill in ${Math.ceil(waitMs / 1000)}s...`;
   onLog?.(msg);
   console.log(msg);
-  await new Promise((resolve) => setTimeout(resolve, waitMs));
+  await sleepMs(waitMs, { shouldStop });
 }
 
 function getLanguageId(data) {
@@ -527,27 +544,27 @@ export async function runBatch(config, options = {}) {
   const promoters = targets.map((target) => target.promoter);
   const runCount = targets.reduce((sum, target) => sum + target.count, 0);
   const { min: minPerMin, max: maxPerMin } = getPerMinuteRange(config);
-  const avgPerPromoterRate = (minPerMin + maxPerMin) / 2;
-  const avgTotalRate = avgPerPromoterRate * targets.length;
-  const estimatedMinutes = Math.ceil(runCount / avgTotalRate);
 
   const log = (msg) => {
     onLog(msg);
     console.log(msg);
   };
 
+  const minIntervalSec = (60 / maxPerMin).toFixed(1);
+  const maxIntervalSec = (60 / minPerMin).toFixed(1);
   log(
     `Starting ${runCount} form submission(s) | ${targets
       .map((target) => `${target.promoter}×${target.count}`)
-      .join(", ")} | random ${minPerMin}–${maxPerMin} per promoter/min (${minPerMin * targets.length}–${maxPerMin * targets.length} total, ~${estimatedMinutes} min)...`,
+      .join(", ")} | random ${minPerMin}–${maxPerMin} per promoter/min, evenly spaced (~${minIntervalSec}–${maxIntervalSec}s apart; ${minPerMin * targets.length}–${maxPerMin * targets.length} total/min)...`,
   );
   log(`Form URL: ${resolveFormUrl(config)}`);
   log(`Promoter order (shuffled): ${promoters.join(", ")}`);
 
-  const peakConcurrent = targets.length * maxPerMin;
+  // One in-flight page per promoter (fills are sequential and paced).
+  const peakConcurrent = targets.length;
   const poolSize = Math.max(1, Math.ceil(peakConcurrent / PAGES_PER_BROWSER));
   log(
-    `Chromium pool: ${poolSize} browser(s) × up to ${PAGES_PER_BROWSER} pages (peak ${peakConcurrent} simultaneous)`,
+    `Chromium pool: ${poolSize} browser(s) × up to ${PAGES_PER_BROWSER} pages (peak ~${peakConcurrent} simultaneous)`,
   );
 
   const genderByPromoter = Object.fromEntries(
@@ -564,119 +581,127 @@ export async function runBatch(config, options = {}) {
   const pool = createBrowserPool({ headless, size: poolSize, onLog: log });
   const results = [];
   const doneByPromoter = Object.fromEntries(promoters.map((p) => [p, 0]));
+  const promoterSlot = Object.fromEntries(promoters.map((p, i) => [p, i]));
   let completed = 0;
-  let batchNumber = 0;
+  let nextRunNumber = 0;
 
-  try {
-    for (let offset = 0; offset < runCount; ) {
+  const allocateRun = () => {
+    nextRunNumber += 1;
+    return nextRunNumber;
+  };
+
+  async function submitOne(target) {
+    const run = allocateRun();
+    doneByPromoter[target.promoter] += 1;
+    const done = doneByPromoter[target.promoter];
+    const gender = genderByPromoter[target.promoter][done - 1];
+    const data = buildRunData({ ...config, promoter: target.promoter }, gender);
+    const formName = formShortName(resolveFormUrl(config));
+
+    log(
+      `Run ${formName} ${run}/${runCount} | ${target.promoter} (${done}/${target.count}) | ${data.answers?.gender ?? "configured data"}`,
+    );
+
+    let lastError;
+    for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt += 1) {
+      try {
+        const result = await pool.withPage(
+          promoterSlot[target.promoter],
+          async (page) => {
+            await fillForm(page, data, { isFirstRun: true });
+            return {
+              run,
+              name: data.fullName,
+              promoter: target.promoter,
+              formUrl: resolveFormUrl(config),
+              status: "success",
+              url: page.url(),
+            };
+          },
+        );
+        results.push(result);
+        log(
+          `Run ${run} done${attempt > 1 ? ` on retry ${attempt - 1}` : ""}: ${result.url}`,
+        );
+        lastError = null;
+        break;
+      } catch (error) {
+        if (error.message === "Stopped by user") throw error;
+        lastError = error;
+        if (attempt <= MAX_RETRIES) {
+          const waitMs = isBrowserDeadError(error) ? 400 * attempt : 200;
+          log(
+            `Run ${run} failed (attempt ${attempt}); retrying (${MAX_RETRIES - attempt} retries left): ${shortError(error)}`,
+          );
+          await sleepMs(waitMs, { shouldStop });
+        }
+      }
+    }
+
+    if (lastError) {
+      const result = {
+        run,
+        name: data.fullName,
+        promoter: target.promoter,
+        formUrl: resolveFormUrl(config),
+        status: "failed",
+        error: shortError(lastError),
+      };
+      results.push(result);
+      console.error(
+        `Run ${run} failed after ${MAX_RETRIES} retries: ${result.error}`,
+      );
+      log(`Run ${run} failed after ${MAX_RETRIES} retries: ${result.error}`);
+    }
+
+    completed += 1;
+    onProgress({ current: completed, total: runCount, results });
+  }
+
+  async function runPromoterPaced(target) {
+    let windowNumber = 0;
+    while (doneByPromoter[target.promoter] < target.count) {
       if (shouldStop()) {
-        log("Stopped by user.");
+        log(`Stopped by user (${target.promoter}).`);
         break;
       }
 
-      batchNumber += 1;
-      const perPromoterBatchSize = randomInt(minPerMin, maxPerMin);
-      const batch = [];
-      for (const target of targets) {
-        const remaining = target.count - doneByPromoter[target.promoter];
-        for (let n = 1; n <= Math.min(perPromoterBatchSize, remaining); n++) {
-          batch.push({
-            promoter: target.promoter,
-            indexInPromoter: doneByPromoter[target.promoter] + n,
-            countPer: target.count,
-            gender:
-              genderByPromoter[target.promoter][
-                doneByPromoter[target.promoter] + n - 1
-              ],
+      windowNumber += 1;
+      const rate = randomInt(minPerMin, maxPerMin);
+      const intervalMs = Math.floor(60_000 / rate);
+      const fillsThisWindow = Math.min(
+        rate,
+        target.count - doneByPromoter[target.promoter],
+      );
+
+      log(
+        `\n--- ${target.promoter} window ${windowNumber}: ${fillsThisWindow} fill(s) at ~${(intervalMs / 1000).toFixed(1)}s apart (${rate}/min) ---`,
+      );
+
+      for (let i = 0; i < fillsThisWindow; i++) {
+        if (shouldStop()) {
+          log(`Stopped by user (${target.promoter}).`);
+          return;
+        }
+
+        const slotStartedAt = Date.now();
+        await submitOne(target);
+
+        const moreInWindow = i < fillsThisWindow - 1;
+        const moreOverall = doneByPromoter[target.promoter] < target.count;
+        if (moreInWindow && moreOverall && !shouldStop()) {
+          await waitForPaceInterval(slotStartedAt, intervalMs, {
+            shouldStop,
+            onLog: log,
+            label: target.promoter,
           });
         }
       }
-      if (batch.length === 0) break;
-      const batchStartedAt = Date.now();
-      log(
-        `\n--- Batch ${batchNumber}: ${perPromoterBatchSize} per promoter, launching ${batch.length} form(s) simultaneously ---`,
-      );
-
-      await Promise.all(
-        batch.map(async (item, index) => {
-          const run = offset + index + 1;
-          doneByPromoter[item.promoter] =
-            (doneByPromoter[item.promoter] || 0) + 1;
-          const data = buildRunData(
-            { ...config, promoter: item.promoter },
-            item.gender,
-          );
-
-          const formName = formShortName(resolveFormUrl(config));
-          log(
-            `Run ${formName} ${run}/${runCount} | ${item.promoter} (${doneByPromoter[item.promoter]}/${item.countPer}) | ${data.answers?.gender ?? "configured data"}`,
-          );
-
-          if (index > 0) {
-            await new Promise((resolve) => setTimeout(resolve, index * 15));
-          }
-
-          let lastError;
-          for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt += 1) {
-            try {
-              const result = await pool.withPage(index, async (page) => {
-                await fillForm(page, data, { isFirstRun: true });
-                return {
-                  run,
-                  name: data.fullName,
-                  promoter: item.promoter,
-                  formUrl: resolveFormUrl(config),
-                  status: "success",
-                  url: page.url(),
-                };
-              });
-              results.push(result);
-              log(
-                `Run ${run} done${attempt > 1 ? ` on retry ${attempt - 1}` : ""}: ${result.url}`,
-              );
-              lastError = null;
-              break;
-            } catch (error) {
-              if (error.message === "Stopped by user") throw error;
-              lastError = error;
-              if (attempt <= MAX_RETRIES) {
-                const waitMs = isBrowserDeadError(error) ? 400 * attempt : 200;
-                log(
-                  `Run ${run} failed (attempt ${attempt}); retrying (${MAX_RETRIES - attempt} retries left): ${shortError(error)}`,
-                );
-                await new Promise((resolve) => setTimeout(resolve, waitMs));
-              }
-            }
-          }
-
-          if (lastError) {
-            const result = {
-              run,
-              name: data.fullName,
-              promoter: item.promoter,
-              formUrl: resolveFormUrl(config),
-              status: "failed",
-              error: shortError(lastError),
-            };
-            results.push(result);
-            console.error(
-              `Run ${run} failed after ${MAX_RETRIES} retries: ${result.error}`,
-            );
-            log(
-              `Run ${run} failed after ${MAX_RETRIES} retries: ${result.error}`,
-            );
-          }
-
-          completed += 1;
-          onProgress({ current: completed, total: runCount, results });
-        }),
-      );
-
-      offset += batch.length;
-      if (offset < runCount && !shouldStop()) {
-        await waitForNextBatch(batchStartedAt, { shouldStop, onLog });
-      }
     }
+  }
+
+  try {
+    await Promise.all(targets.map((target) => runPromoterPaced(target)));
   } finally {
     if (!headless) {
       log("\nBrowser will close in 5 seconds...");

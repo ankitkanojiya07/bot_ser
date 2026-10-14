@@ -5,12 +5,14 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
+    "mail": "node --env-file=.env mail-server.js",
     "fill": "node fill-form.js",
     "fill:headless": "HEADLESS=true node fill-form.js",
     "fill:batch": "node fill-form.js",
     "fill:batch:headless": "HEADLESS=true node fill-form.js"
   },
   "dependencies": {
+    "nodemailer": "^10.0.14",
     "playwright": "1.61.0"
   }
 }

@@ -214,12 +214,6 @@ async function startJob(input) {
   const campaignTotal = (campaign) =>
     campaign.promoters.reduce((sum, item) => sum + item.count, 0);
   const total = campaigns.reduce((sum, campaign) => sum + campaignTotal(campaign), 0);
-  const avgRate = campaigns.reduce(
-    (sum, campaign) =>
-      sum + ((perMinuteMin + perMinuteMax) / 2) * campaign.promoters.length,
-    0,
-  );
-  const estimatedMinutes = Math.ceil(total / Math.max(avgRate, 1));
   const config = {
     campaigns,
     formUrl: campaigns[0].formUrl,
@@ -258,7 +252,7 @@ async function startJob(input) {
   }));
 
   pushLog(
-    `Job queued: ${campaigns.length} form(s) in parallel, ${total} total submissions (~${estimatedMinutes} min)`,
+    `Job queued: ${campaigns.length} form(s) in parallel, ${total} total submissions`,
   );
   campaigns.forEach((campaign, index) => {
     pushLog(
@@ -488,7 +482,7 @@ const HTML = `<!DOCTYPE html>
     .badge.error { background: #3a1e1e; color: var(--danger); }
     .meta {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(4, 1fr);
       gap: 0.75rem;
       margin: 1rem 0;
     }
@@ -615,7 +609,7 @@ const HTML = `<!DOCTYPE html>
       margin: 0.15rem 0 0.35rem;
     }
     @media (max-width: 520px) {
-      .row, .meta { grid-template-columns: 1fr; }
+      .row, .meta { grid-template-columns: 1fr 1fr; }
       .actions { flex-direction: column; }
     }
   </style>
@@ -628,7 +622,7 @@ const HTML = `<!DOCTYPE html>
     <form id="jobForm">
       <div id="campaigns" class="campaigns"></div>
       <button type="button" id="addCampaign">+ Add another form</button>
-      <p class="hint" style="margin-top:-0.6rem;margin-bottom:1rem;">Every form starts together. Simultaneous browsers = number of promoter IDs × max per minute, added across all forms.</p>
+      <p class="hint" style="margin-top:-0.6rem;margin-bottom:1rem;">Every form starts together. Each promoter spreads its fills evenly across the minute (e.g. 5/min → one every 12s). Peak browsers ≈ total promoter IDs across running forms.</p>
       <div class="row">
         <div class="field">
           <label for="perMinuteMin">Min per promoter / min</label>
@@ -661,6 +655,7 @@ const HTML = `<!DOCTYPE html>
         <div class="stat"><strong id="statCurrent">0</strong><span>Current</span></div>
         <div class="stat"><strong id="statOk">0</strong><span>Success</span></div>
         <div class="stat"><strong id="statFail">0</strong><span>Failed</span></div>
+        <div class="stat"><strong id="statTime">—</strong><span id="statTimeLabel">Est. time</span></div>
       </div>
       <div class="progress-wrap"><div class="progress-bar" id="progressBar"></div></div>
       <div id="campaignStatus"></div>
@@ -790,21 +785,65 @@ const HTML = `<!DOCTYPE html>
       updateTotalHint();
     }
 
-    function updateTotalHint() {
+    function formatDurationMinutes(minutes) {
+      const m = Math.max(0, Math.ceil(Number(minutes) || 0));
+      if (m < 60) return m + " min";
+      const h = Math.floor(m / 60);
+      const rem = m % 60;
+      return rem ? h + "h " + rem + "m" : h + "h";
+    }
+
+    function formatDurationRange(minMinutes, maxMinutes) {
+      const lo = Math.max(0, Math.ceil(Number(minMinutes) || 0));
+      const hi = Math.max(lo, Math.ceil(Number(maxMinutes) || 0));
+      if (!lo && !hi) return "";
+      if (lo === hi) return "~" + formatDurationMinutes(lo);
+      return "~" + formatDurationMinutes(lo) + " – " + formatDurationMinutes(hi);
+    }
+
+    function estimateFromForm() {
       const campaigns = collectCampaigns();
-      const maxR = Number(form.perMinuteMax.value) || 14;
+      const minR = Math.max(1, Number(form.perMinuteMin.value) || 5);
+      const maxR = Math.max(minR, Number(form.perMinuteMax.value) || 14);
       let total = 0;
       let peak = 0;
+      let maxCount = 0;
       campaigns.forEach(function (campaign) {
         campaign.promoters.forEach(function (item) {
-          total += Number(item.count) || 0;
+          const count = Number(item.count) || 0;
+          total += count;
+          if (count > maxCount) maxCount = count;
         });
-        peak += campaign.promoters.length * maxR;
+        peak += campaign.promoters.length;
       });
-      const formCount = campaigns.length;
-      totalHint.textContent = total
-        ? formCount + " form(s) in parallel · " + total + " submissions · ~" + peak + " simultaneous browsers (no cap)"
-        : "Add a form URL, then each promoter ID and how many completions it needs";
+      const minMinutes = maxCount ? Math.ceil(maxCount / maxR) : 0;
+      const maxMinutes = maxCount ? Math.ceil(maxCount / minR) : 0;
+      return {
+        campaigns: campaigns.length,
+        total: total,
+        peak: peak,
+        maxCount: maxCount,
+        minMinutes: minMinutes,
+        maxMinutes: maxMinutes,
+        timeLabel: formatDurationRange(minMinutes, maxMinutes),
+      };
+    }
+
+    function updateTotalHint() {
+      const est = estimateFromForm();
+      const minR = Number(form.perMinuteMin.value) || 5;
+      const maxR = Number(form.perMinuteMax.value) || 14;
+      const paceLo = (60 / Math.max(maxR, 1)).toFixed(1);
+      const paceHi = (60 / Math.max(minR, 1)).toFixed(1);
+      if (!est.total) {
+        totalHint.textContent = "Add a form URL, then each promoter ID and how many completions it needs";
+        document.getElementById("statTime").textContent = "—";
+        return;
+      }
+      totalHint.textContent =
+        est.campaigns + " form(s) in parallel · " + est.total + " submissions · paced ~" +
+        paceLo + "–" + paceHi + "s apart · ~" + est.peak + " simultaneous browsers";
+      document.getElementById("statTime").textContent = est.timeLabel || "—";
     }
 
     async function loadDefaults() {
@@ -867,6 +906,10 @@ const HTML = `<!DOCTYPE html>
         status.total ? status.current + "/" + status.total : "0";
       document.getElementById("statOk").textContent = status.succeeded || 0;
       document.getElementById("statFail").textContent = status.failed || 0;
+
+      const est = estimateFromForm();
+      document.getElementById("statTime").textContent = est.timeLabel || "—";
+      document.getElementById("statTimeLabel").textContent = "Est. time";
 
       const pct = status.total ? Math.round((status.current / status.total) * 100) : 0;
       progressBar.style.width = pct + "%";
