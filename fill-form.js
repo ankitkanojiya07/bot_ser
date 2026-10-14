@@ -360,7 +360,7 @@ async function sleepMs(ms, { shouldStop } = {}) {
   }
 }
 
-/** Space fills evenly: if rate is 5/min, wait ~12s between starts. */
+/** Wait until intervalMs has elapsed since slotStartedAt (pace or hard 60s window). */
 async function waitForPaceInterval(
   slotStartedAt,
   intervalMs,
@@ -555,7 +555,7 @@ export async function runBatch(config, options = {}) {
   log(
     `Starting ${runCount} form submission(s) | ${targets
       .map((target) => `${target.promoter}×${target.count}`)
-      .join(", ")} | random ${minPerMin}–${maxPerMin} per promoter/min, evenly spaced (~${minIntervalSec}–${maxIntervalSec}s apart; ${minPerMin * targets.length}–${maxPerMin * targets.length} total/min)...`,
+      .join(", ")} | random ${minPerMin}–${maxPerMin} per promoter/min (hard 60s window), evenly spaced (~${minIntervalSec}–${maxIntervalSec}s apart; ${minPerMin * targets.length}–${maxPerMin * targets.length} total/min)...`,
   );
   log(`Form URL: ${resolveFormUrl(config)}`);
   log(`Promoter order (shuffled): ${promoters.join(", ")}`);
@@ -667,6 +667,7 @@ export async function runBatch(config, options = {}) {
       }
 
       windowNumber += 1;
+      const windowStartedAt = Date.now();
       const rate = randomInt(minPerMin, maxPerMin);
       const intervalMs = Math.floor(60_000 / rate);
       const fillsThisWindow = Math.min(
@@ -675,7 +676,7 @@ export async function runBatch(config, options = {}) {
       );
 
       log(
-        `\n--- ${target.promoter} window ${windowNumber}: ${fillsThisWindow} fill(s) at ~${(intervalMs / 1000).toFixed(1)}s apart (${rate}/min) ---`,
+        `\n--- ${target.promoter} window ${windowNumber}: ${fillsThisWindow} fill(s) at ~${(intervalMs / 1000).toFixed(1)}s apart (${rate}/min, hard 60s cap) ---`,
       );
 
       for (let i = 0; i < fillsThisWindow; i++) {
@@ -696,6 +697,17 @@ export async function runBatch(config, options = {}) {
             label: target.promoter,
           });
         }
+      }
+
+      // Hard cap: never start the next window before a full 60s elapses.
+      const moreOverall =
+        doneByPromoter[target.promoter] < target.count && !shouldStop();
+      if (moreOverall) {
+        await waitForPaceInterval(windowStartedAt, 60_000, {
+          shouldStop,
+          onLog: log,
+          label: target.promoter,
+        });
       }
     }
   }
